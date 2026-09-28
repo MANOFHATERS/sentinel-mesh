@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sentinel-mesh"
+version = "0.1.0"
+description = "Sentinel Mesh — an autonomous, agentic SOC for the mid-market and the MSSPs that protect it"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.7",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "scikit-learn>=1.4",
+]
+
+[project.optional-dependencies]
+# Part 2+ dependencies. Deliberately optional so the Part 1 foundation
+# installs, imports and tests with zero heavy or network-bound deps.
+bus = ["redis>=5.0"]
+deep = ["torch>=2.2"]
+graph = ["torch-geometric>=2.5"]
+agents = ["langgraph>=0.2", "anthropic>=0.34", "faiss-cpu>=1.8", "sentence-transformers>=3.0"]
+api = ["fastapi>=0.110", "uvicorn>=0.29"]
+dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.4", "mypy>=1.10"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q --strict-markers"
+markers = [
+    "slow: tests that train models or process large data",
+    "needs_redis: requires a live Redis server on localhost",
+    "needs_real_data: requires CIC-IDS2017 / UNSW-NB15 CSVs in data/raw",
+]
+filterwarnings = ["error::DeprecationWarning:sentinel.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# RUF001/RUF002 flag "ambiguous" Unicode characters. In these files the ambiguous
+# characters ARE the subject matter and must stay byte-exact:
+#   * normalizer.py folds every dash spelling CIC-IDS2017 ships, including the
+#     cp1252 mojibake byte, and rejects bidi/zero-width characters;
+#   * untrusted.py detects Trojan-Source-style bidi controls and line/paragraph
+#     separators, so it must contain the literal codepoints it looks for;
+#   * synthetic.py reproduces the real "Web Attack \u2013 Brute Force" label;
+#   * the tests assert all of the above.
+# Normalising them to ASCII would delete the behaviour under test.
+"src/sentinel/core/untrusted.py" = ["RUF001", "RUF002"]
+"src/sentinel/ingest/normalizer.py" = ["RUF001", "RUF002"]
+"src/sentinel/ml/datasets/synthetic.py" = ["RUF001", "RUF002"]
+"tests/unit/test_normalizer.py" = ["RUF001", "RUF002"]
+"tests/unit/test_untrusted.py" = ["RUF001", "RUF002"]
+# test_audit_log.py asserts the fast-path serializer handles the same
+# adversarial codepoints byte-for-byte as the generic canonicalizer, so it
+# must contain them literally. RUF012 fires on the BASE/NASTY fixtures, which
+# are read-only test data shared across parametrisations.
+"tests/unit/test_audit_log.py" = ["RUF001", "RUF002", "RUF012"]
+"tests/integration/test_pipeline.py" = ["RUF001", "RUF002"]
+
+[tool.mypy]
+python_version = "3.12"
+packages = ["sentinel"]
+mypy_path = "src"
+strict = true
+warn_unreachable = true
