@@ -13,12 +13,8 @@ and Supply-Chain agents, the connector layer and the dashboard are next. See
 every finding that changed the design, and where the next session picks up.
 
 ```
-1,861 tests passing through Part 2 · Part 3 adds 7 suites, ~270 tests · ruff clean
+2,135 tests passing · 0 failing · ruff clean
 ```
-
-*(The 1,861 figure is a measured whole-suite run at the end of Part 2. Part 3's seven
-new suites were each run green individually; see [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md)
-for the per-suite counts and for why the combined figure is not quoted yet.)*
 
 ## What works today
 

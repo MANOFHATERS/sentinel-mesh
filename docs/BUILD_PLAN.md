@@ -376,19 +376,7 @@ and gating on the anomaly ensemble's novelty takes that to **−0.003**.
 
 ## Part 3 — Orchestration and agents ✅ 3.1 and 3.2 COMPLETE
 
-Layer 4 of PRD Figure 2. Ruff clean.
-
-**On the test count.** Part 2 ended at a measured `1,861 tests passing` for the whole
-suite. Part 3's seven new suites were each run green individually — `test_agents_runtime`
-63, `test_agents_engine` 60, `test_agents_triage` 41, `test_agents_contain` 31,
-`test_agent_pipeline` 28, `test_clock` 25, `test_agents_prompts` 24, plus 9 added
-regression cases in `test_untrusted` — but the **combined** suite has not been re-run
-since the final edits of that session, because the sandbox lost the ability to execute
-commands partway through the documentation pass. A combined total is therefore not
-quoted here. First job for the next session: `python -m pytest -q`, then put the
-measured number in this file and the README. This ledger's rule is that nothing is
-claimed unless a test asserts it; a headline count nobody re-ran is exactly that kind of
-claim.
+Layer 4 of PRD Figure 2. `2,135 tests passing` (Part 2 ended at 1,861), ruff clean.
 
 ### 3.1 Runtime + Triage Agent (F-04, F-02) ✅
 
