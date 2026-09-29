@@ -61,6 +61,7 @@ __all__ = [
     "SourceEdit",
     "apply_edits",
     "apply_unified_diff",
+    "compose_patches",
     "ensure_import_edit",
     "normalise_source",
     "offset_of",
@@ -345,6 +346,230 @@ def apply_unified_diff(before: str, diff: str) -> str:
             index += 1
 
     out.extend(source_lines[cursor:])
+    return "".join(out)
+
+
+# --------------------------------------------------------------------------- #
+# Composing several patches to one file (Part 4)
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True, slots=True)
+class _Change:
+    """One contiguous run of removed and added lines, positioned in the original.
+
+    ``start`` is the 0-based index of the first original line the run replaces, or,
+    for a pure insertion, the index of the line it is inserted *before*. Context
+    lines are deliberately not part of a change: two patches three lines apart share
+    context, and treating shared context as an overlap would refuse to compose
+    exactly the pair of fixes a real file most often needs.
+    """
+
+    start: int
+    removed: tuple[str, ...]
+    added: tuple[str, ...]
+
+    @property
+    def end(self) -> int:
+        return self.start + len(self.removed)
+
+
+def _changes_of(diff: str) -> list[_Change]:
+    """Parse a unified diff into context-free changes against its original."""
+    changes: list[_Change] = []
+    lines = diff.splitlines(keepends=True)
+    index = 0
+    while index < len(lines):
+        match = _HUNK_HEADER.match(lines[index])
+        index += 1
+        if match is None:
+            continue
+        old_start = int(match.group("old_start"))
+        old_count = 1 if match.group("old_count") is None else int(match.group("old_count"))
+        cursor = old_start if old_count == 0 else old_start - 1
+        removed: list[str] = []
+        added: list[str] = []
+        run_start = cursor
+        while index < len(lines) and not _HUNK_HEADER.match(lines[index]):
+            body = lines[index]
+            index += 1
+            marker, content = body[:1], body[1:]
+            if marker in {"-", "+"}:
+                if not removed and not added:
+                    run_start = cursor
+                if marker == "-":
+                    removed.append(content)
+                    cursor += 1
+                else:
+                    added.append(content)
+                continue
+            if marker == "\\":
+                continue
+            if marker != " " and body not in {"\n", ""}:
+                raise PatchError(f"unrecognised diff line: {body!r}")
+            if removed or added:
+                changes.append(_Change(run_start, tuple(removed), tuple(added)))
+                removed, added = [], []
+            cursor += 1
+        if removed or added:
+            changes.append(_Change(run_start, tuple(removed), tuple(added)))
+    return changes
+
+
+#: A source token for merging: a quoted string (whole), a word or number (whole),
+#: a run of whitespace, or one other character.
+_TOKEN: Final[re.Pattern[str]] = re.compile(
+    r'"(?:[^"\\\n]|\\.)*"|\'(?:[^\'\\\n]|\\.)*\'|\w+|\s+|.', re.DOTALL
+)
+
+
+def _tokens(text: str) -> list[str]:
+    return _TOKEN.findall(text)
+
+
+def _token_edits(base: list[str], other: list[str]) -> list[tuple[int, int, tuple[str, ...]]]:
+    """``(start, end, replacement)`` token spans of ``base`` that ``other`` changes."""
+    matcher = difflib.SequenceMatcher(None, base, other, autojunk=False)
+    return [
+        (i1, i2, tuple(other[j1:j2]))
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes()
+        if tag != "equal"
+    ]
+
+
+def _merge_text(base: str, left: str, right: str) -> str | None:
+    """A token-level three-way merge, or ``None`` when the edits collide.
+
+    Tokens, not characters, and the difference was measured rather than assumed. At
+    character granularity, two *competing* rewrites of one literal — ``"0.0.0.0"``
+    to ``"127.0.0.1"`` in one patch and to ``"10.0.0.1"`` in another — are aligned
+    by the differ into interleaved single-character edits that do not overlap, and
+    the "merge" produced ``host="1127.0.0.1"``: a valid, parseable, wrong bind
+    address. A string literal, identifier or number is atomic here, so those two
+    edits land on the same token and collide, which is the correct answer.
+
+    Two edits collide when their token spans overlap, or when both insert at the
+    same point (there is no principled order for two insertions in one place).
+    """
+    base_tokens = _tokens(base)
+    edits = sorted(
+        set(_token_edits(base_tokens, _tokens(left)) + _token_edits(base_tokens, _tokens(right))),
+        key=lambda e: (e[0], e[1]),
+    )
+    for (s1, e1, _r1), (s2, e2, _r2) in pairwise(edits):
+        if s2 < e1:
+            return None
+        if s1 == e1 == s2 == e2:
+            return None
+    out: list[str] = []
+    cursor = 0
+    for start, end, replacement in edits:
+        out.extend(base_tokens[cursor:start])
+        out.extend(replacement)
+        cursor = end
+    out.extend(base_tokens[cursor:])
+    return "".join(out)
+
+
+def _merge_same_range(changes: dict[_Change, int]) -> dict[_Change, int]:
+    """Fold changes that replace exactly the same original lines differently.
+
+    Found on the F-07 fixture, not anticipated: ``app.run(debug=True,
+    host="0.0.0.0")`` carries two seeded defects on one line, and the two validated
+    fixes each rewrite that whole line — one flips ``debug``, the other rebinds
+    ``host``. At line granularity they are a conflict; at token granularity they
+    touch different bytes and compose cleanly. Anything that still overlaps after
+    that raises, as before.
+    """
+    groups: dict[tuple[int, tuple[str, ...]], list[_Change]] = {}
+    for change in changes:
+        if change.removed:
+            groups.setdefault((change.start, change.removed), []).append(change)
+    merged: dict[_Change, int] = {}
+    folded: set[_Change] = set()
+    for (start, removed), members in groups.items():
+        if len(members) < 2:
+            continue
+        members.sort(key=lambda c: changes[c])
+        base = "".join(removed)
+        text = "".join(members[0].added)
+        for other in members[1:]:
+            result = _merge_text(base, text, "".join(other.added))
+            if result is None:
+                raise PatchError(
+                    f"two patches rewrite line {start + 1} in overlapping places; "
+                    "refusing to choose between them"
+                )
+            text = result
+        combined = _Change(start, removed, tuple(text.splitlines(keepends=True)))
+        merged[combined] = min(changes[c] for c in members)
+        folded.update(members)
+    for change, order in changes.items():
+        if change not in folded:
+            merged.setdefault(change, order)
+    return merged
+
+
+def compose_patches(before: str, diffs: tuple[str, ...] | list[str]) -> str:
+    """Apply several diffs, each written against ``before``, as one edit.
+
+    The Code-Scan Agent validates every patch independently against the original
+    file, which is the right unit for review — one finding, one hunk — and the wrong
+    unit for a commit. Applying them one after another does not work: the first patch
+    shifts the line numbers every later hunk header names, and ``git apply`` of the
+    second would fail or, worse, apply with an offset at the wrong place.
+
+    So each diff is reduced to its context-free changes, positioned in the original.
+    Identical changes are merged (two fixes that each add ``import shlex`` at the top
+    of the file want one import, not two); changes are ordered by position; and any
+    two that touch an overlapping range of original lines raise :class:`PatchError`,
+    because there is no mechanical answer to which one wins and guessing is how a
+    security patch silently drops half of itself. Every removed line is verified
+    against ``before``, so a diff written against a different version of the file is
+    refused here rather than pushed.
+    """
+    source = before.splitlines(keepends=True)
+    unique: dict[_Change, int] = {}
+    for order, diff in enumerate(diffs):
+        for change in _changes_of(diff):
+            unique.setdefault(change, order)
+    unique = _merge_same_range(unique)
+    ordered = sorted(
+        unique,
+        # Insertions at a point go before a replacement starting at the same point:
+        # "insert before line s" and "replace line s" compose in that order.
+        key=lambda c: (c.start, bool(c.removed), unique[c]),
+    )
+    for change in ordered:
+        if change.end > len(source):
+            raise PatchError(
+                f"a change at line {change.start + 1} runs past the end of the file "
+                f"({len(source)} lines)"
+            )
+        for offset, expected in enumerate(change.removed):
+            found = source[change.start + offset]
+            if found != expected:
+                raise PatchError(
+                    f"the diff does not match the file at line "
+                    f"{change.start + offset + 1}: expected {expected!r}, found {found!r}"
+                )
+    for first, second in pairwise(ordered):
+        if not first.removed:
+            continue  # an insertion occupies a point, not a range
+        if second.start < first.end:
+            raise PatchError(
+                f"two patches change overlapping lines ({first.start + 1}-{first.end} "
+                f"and {second.start + 1}-{max(second.end, second.start + 1)}); refusing "
+                "to choose between them"
+            )
+
+    out: list[str] = []
+    cursor = 0
+    for change in ordered:
+        out.extend(source[cursor : change.start])
+        out.extend(change.added)
+        cursor = max(cursor, change.end)
+    out.extend(source[cursor:])
     return "".join(out)
 
 

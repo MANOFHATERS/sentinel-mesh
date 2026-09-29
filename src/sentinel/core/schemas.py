@@ -312,6 +312,10 @@ class AuditEventType(StrEnum):
     #: Part 3.3. A supply-chain assessment scored a graph. Continuous rather than
     #: alert-driven, which is why it has its own event and its own graph.
     SUPPLY_CHAIN_ASSESSED = "supply_chain_assessed"
+    #: Part 4. One HTTP attempt by a Layer 5 connector: route name, status, attempt,
+    #: duration and a digest of the request body. Never the body, a header or a URL
+    #: query — the credential and the target system's response stay out of the log.
+    CONNECTOR_CALLED = "connector_called"
 
 
 # --------------------------------------------------------------------------- #

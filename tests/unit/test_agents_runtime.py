@@ -408,6 +408,100 @@ class TestResumeIsFaithful:
         assert "untrusted" in str(payload)
 
 
+class _Crash(BaseException):
+    """A process death: not an ``Exception``, so no node or runtime handler catches it."""
+
+
+def _crashing_spec(crash_at: str, fired: dict[str, int]) -> GraphSpec:
+    """The linear graph, except ``crash_at`` kills the process the first time it runs."""
+    spec = GraphSpec()
+    for name in ("alpha", "beta", "gamma"):
+        inner = _marker_node(name)
+
+        def node(state, ctx, _name=name, _inner=inner):
+            fired[_name] = fired.get(_name, 0) + 1
+            if _name == crash_at and fired[_name] == 1:
+                raise _Crash
+            return _inner(state, ctx)
+
+        spec.add_node(name, node)
+    spec.add_edge("alpha", "beta")
+    spec.add_edge("beta", "gamma")
+    spec.add_edge("gamma", END)
+    spec.set_entry_point("alpha")
+    return spec
+
+
+class TestRecoverAfterACrash:
+    """Part 4: ``resume`` continues a pause; ``recover`` continues a process death."""
+
+    def test_a_crash_in_the_entry_node_leaves_nothing_to_recover_so_invoke_again(
+        self, state: IncidentState
+    ) -> None:
+        # No checkpoint precedes the first node, so the thread has no history to
+        # fork and invoke() is the recovery; recover() says so rather than guessing.
+        fired: dict[str, int] = {}
+        graph = _crashing_spec("alpha", fired).compile()
+        with pytest.raises(_Crash):
+            graph.invoke(state, clock=FrozenClock(FIXED_NOW))
+        with pytest.raises(OrchestrationError, match="no checkpoint"):
+            graph.recover("incident-1")
+        assert graph.invoke(state, clock=FrozenClock(FIXED_NOW)).state.status is (
+            IncidentStatus.COMPLETED
+        )
+
+    @pytest.mark.parametrize("crash_at", ["beta", "gamma"])
+    def test_a_crash_anywhere_recovers_to_the_uninterrupted_result(
+        self, state: IncidentState, tmp_path, crash_at: str
+    ) -> None:
+        expected = _linear_spec().compile().invoke(state, clock=FrozenClock(FIXED_NOW))
+        path = tmp_path / "checkpoints.sqlite"
+        fired: dict[str, int] = {}
+        with SqliteCheckpointer(path) as store, pytest.raises(_Crash):
+            _crashing_spec(crash_at, fired).compile(checkpointer=store).invoke(
+                state, clock=FrozenClock(FIXED_NOW)
+            )
+        # A fresh process image: new graph, new store, only the file carries over.
+        with SqliteCheckpointer(path) as reopened:
+            graph = _crashing_spec(crash_at, fired).compile(checkpointer=reopened)
+            head = graph.state_of("incident-1")
+            assert head is not None and head.status is IncidentStatus.RUNNING
+            assert head.cursor == crash_at
+            with pytest.raises(OrchestrationError, match="not waiting"):
+                graph.resume("incident-1", _decision(), clock=FrozenClock(FIXED_NOW))
+            recovered = graph.recover("incident-1", clock=FrozenClock(FIXED_NOW))
+        assert recovered.state.status is IncidentStatus.COMPLETED
+        assert [e.ref for e in recovered.state.evidence] == [
+            e.ref for e in expected.state.evidence
+        ]
+        # The crashed node ran twice (once to die, once to finish); the others once.
+        assert fired[crash_at] == 2
+        assert all(n == 1 for name, n in fired.items() if name != crash_at)
+
+    def test_recover_stops_at_a_gate_it_has_not_passed(self, state: IncidentState) -> None:
+        fired: dict[str, int] = {}
+        graph = _crashing_spec("beta", fired).compile(interrupt_before=["gamma"])
+        with pytest.raises(_Crash):
+            graph.invoke(state, clock=FrozenClock(FIXED_NOW))
+        recovered = graph.recover("incident-1", clock=FrozenClock(FIXED_NOW))
+        assert recovered.interrupted and recovered.state.interrupt.node == "gamma"
+
+    def test_recover_refuses_a_waiting_run(self, state: IncidentState) -> None:
+        graph = _linear_spec().compile(interrupt_before=["beta"])
+        graph.invoke(state, clock=FrozenClock(FIXED_NOW))
+        with pytest.raises(OrchestrationError, match="use resume"):
+            graph.recover("incident-1", clock=FrozenClock(FIXED_NOW))
+
+    def test_recover_refuses_a_finished_run(self, state: IncidentState, linear) -> None:
+        linear.invoke(state, clock=FrozenClock(FIXED_NOW))
+        with pytest.raises(OrchestrationError, match="already finished"):
+            linear.recover("incident-1", clock=FrozenClock(FIXED_NOW))
+
+    def test_recover_refuses_an_unknown_thread(self, linear) -> None:
+        with pytest.raises(OrchestrationError, match="no checkpoint"):
+            linear.recover("nope")
+
+
 # --------------------------------------------------------------------------- #
 # Failure is a state, not an exception
 # --------------------------------------------------------------------------- #

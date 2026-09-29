@@ -523,13 +523,63 @@ flags with two paths is a ranking with a story attached to a fifth of it.
 
 ---
 
+## Layer 5 — connectors (Part 4)
+
+### One interface, fixed before the connectors existed
+
+Part 3 wrote every execution node against `execute(action) -> ExecutionOutcome` (and
+`open_draft(action, draft)` for the code-scan graph) and put a stand-in behind it.
+`ConnectorRouter` implements exactly that interface, so Part 4 changed **no node** in any
+graph. The measure of whether the layer was given authority it should not have is that
+`verify_no_ungated_execution` — unchanged since Part 3 — still reads the same rows and
+still returns empty.
+
+### Least privilege is three layers because each fails differently
+
+*Capabilities* bound what the connector's code will attempt; *declared credential
+scopes* bound what the remote would let the token do, checked at construction in both
+directions (too broad and too narrow both refuse); the *egress allowlist* bounds what
+can physically leave the process. The third is the one that holds when the first two are
+wrong — a GitHub token that can open a PR can also merge it, and the Git connector cannot,
+because no `PUT` route is in its policy. Where the remote reports a token's real scopes
+(GitHub's `X-OAuth-Scopes`), the report beats the declaration and is checked on the first
+call, which is a read.
+
+### The transport refuses redirects
+
+`urllib` follows redirects by default and copies `Authorization` to the new location,
+whatever host it is on. `UrllibTransport` returns a 3xx as a response and the client
+treats it as a failure. Tested against a second live server that must receive nothing.
+
+### Targets are validated where they meet the wire
+
+An approved target is still attacker-influenced text. `TargetPolicy` refuses ranges, the
+unspecified address, loopback, multicast, link-local, ambiguous leading-zero octets, an IP
+offered as an account name, and anything on the customer's protected list — after the
+approval, because the approval is exactly what makes a bad target dangerous.
+
+### Exactly once needs a journal *and* a way to recover
+
+Checkpoints are written after a node returns, so a crash after the connector call re-runs
+the node. The execution journal returns the recorded outcome instead of calling again;
+`CompiledGraph.recover()` is what re-runs the node at all, since `resume()` only continues
+a run that is waiting for a human. The pair is measured against a control: one execution
+with the SQLite journal, two without.
+
+### The router writes what happened on the wire
+
+Every HTTP attempt is a `connector_called` row — route name, status, attempt, duration and
+a digest of the request body; never the body, a header or a query string. That makes a
+stronger F-08 checkable after the fact: no `connector_called` row for a gated action may
+precede its `approval_granted` row.
+
+---
+
 ## What is still not built
 
-No real connector layer and no dashboard (F-10). `SimulatedConnector` and
-`DraftPullRequestConnector` stand in, per PRD Section 4.1's explicit scope, and they
-exist because F-08 needs *something* to execute in order for "nothing executes without
-approval" to be a measurement rather than a vacuous pass. Those are Parts 4–5 and are
-scoped in [BUILD_PLAN.md](BUILD_PLAN.md).
+The dashboard (F-10), which is Part 5 and is scoped in [BUILD_PLAN.md](BUILD_PLAN.md).
+The connectors are real HTTP clients exercised against local emulators of the documented
+APIs; no request has yet been sent to a production Wazuh, GitHub, directory or Slack.
 
 All five PRD agents now exist. The foundation was built first specifically so the agent
 layer would inherit its guardrails rather than reimplement them, and Parts 3.1–3.3 are
@@ -538,4 +588,5 @@ the evidence that worked: `ActionRequest`, `TriageResult`, `Evidence` and
 F-08, F-05 and Appendix A. `EvidenceKind.CODE_FINDING` and `EvidenceKind.GRAPH_PATH` were
 in Part 1's enum before either agent that emits them existed; `AlertSource.CODE_SCAN` and
 `AlertSource.VENDOR_FEED` likewise. The two additions across the whole of Part 3.3 are
-two audit event types.
+two audit event types, and Part 4's are one more (`connector_called`), two optional
+fields on `ExecutionOutcome`, and `CompiledGraph.recover()`.

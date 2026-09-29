@@ -380,6 +380,52 @@ class CompiledGraph:
         resumed = state.resumed(cursor=state.interrupt.node, at=ctx.now())
         return self._drive(resumed, ctx, step=head.step + 1)
 
+    def recover(
+        self,
+        thread_id: str,
+        *,
+        clock: Clock | None = None,
+        audit: HashChainedAuditLog | None = None,
+        extras: Mapping[str, object] | None = None,
+    ) -> RunResult:
+        """Continue a run that stopped without reaching END or an interrupt.
+
+        Part 4, and found by writing the test for the execution journal rather than
+        anticipated. :meth:`resume` continues a run that *paused*; nothing continued
+        a run whose process *died*. A checkpoint is written after each node returns,
+        so a crash inside a node — after the connector call, before the node's own
+        return — leaves the thread ``RUNNING`` with its cursor on that node, and
+        ``resume`` correctly refuses it because it is not waiting for anyone. F-04's
+        *"resume with full context intact"* has to cover the crash as well as the
+        pause, or the approved action is stranded.
+
+        The node re-runs from the last checkpoint, which is exactly the case
+        :mod:`sentinel.connectors.journal` exists for: the router finds the action
+        already completed and replays the outcome instead of isolating the host a
+        second time. No human decision is taken here — if the run had not yet been
+        approved, the cursor is at or before the gate and the gate stops it again.
+        """
+        head = self.checkpointer.latest(thread_id)
+        if head is None:
+            raise OrchestrationError(f"no checkpoint for thread {thread_id!r}")
+        state = head.state
+        if state.status.is_terminal:
+            raise OrchestrationError(
+                f"thread {thread_id!r} already finished ({state.status.value}); nothing "
+                "to recover"
+            )
+        if state.is_waiting:
+            raise OrchestrationError(
+                f"thread {thread_id!r} is waiting for a human decision; use resume()"
+            )
+        ctx = RunContext(
+            clock=clock or SystemClock(),
+            thread_id=thread_id,
+            audit=audit,
+            extras=dict(extras or {}),
+        )
+        return self._drive(state, ctx, step=head.step + 1)
+
     # --- the loop ------------------------------------------------------------- #
 
     def _drive(self, state: IncidentState, ctx: RunContext, *, step: int) -> RunResult:

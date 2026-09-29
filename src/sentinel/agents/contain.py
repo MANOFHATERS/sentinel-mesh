@@ -52,6 +52,7 @@ from typing import Final
 import numpy as np
 
 from sentinel.audit.log import HashChainedAuditLog
+from sentinel.connectors.base import ExecutionOutcome
 from sentinel.core.clock import Clock, SystemClock
 from sentinel.core.errors import GuardrailViolation, SentinelError
 from sentinel.core.schemas import (
@@ -122,22 +123,14 @@ class Proposal:
         return self.action is not None and self.action.requires_human_approval
 
 
-@dataclass(frozen=True, slots=True)
-class ExecutionOutcome:
-    """What a connector reported back."""
-
-    succeeded: bool
-    detail: str
-
-
 class SimulatedConnector:
     """A mocked EDR/firewall, per PRD Section 4.1's explicit scope.
 
-    Part 4 replaces this with the least-privilege connector layer. It is here
-    rather than in a ``connectors`` package because F-08 needs *something* to
-    execute in order to prove that nothing executes without approval — a gate
-    with nothing behind it tests nothing — and inventing the real interface now
-    would fix a design that Part 4 should choose with the connectors in hand.
+    Part 4 built the real layer in :mod:`sentinel.connectors` —
+    :class:`~sentinel.connectors.router.ConnectorRouter` in front of Wazuh, SCIM,
+    GitHub and Slack connectors — and this stays as the hermetic default, because
+    the one-command evaluation must run with no network and F-08 still needs
+    *something* to execute in order to prove that nothing executes without approval.
 
     It records what it was asked to do, so a test can assert the negative: that
     a rejected action never reached it.

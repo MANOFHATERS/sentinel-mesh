@@ -8,39 +8,30 @@ with code but no test is listed as *partial*.
 
 ## Where things stand, and what the next session builds
 
-Parts 1, 2 and 3 are complete. **All five PRD agents exist**, on three checkpointed
-graphs that share one state machine, one Human Approval Gate and one audit chain. Every
-acceptance criterion except **F-10** is met and measured by one command:
+Parts 1, 2, 3 and 4 are complete. **All five PRD agents exist**, on three checkpointed
+graphs that share one state machine, one Human Approval Gate and one audit chain, and
+since Part 4 every approved action leaves the process through **real HTTP connectors**
+(Wazuh, SCIM, GitHub, Slack/webhooks) behind a least-privilege router. Every acceptance
+criterion except **F-10** is met and measured by one command, which exits non-zero if any
+gate fails:
 
 ```bash
 python scripts/evaluate.py --n 20000 --cross-dataset --graph --kb --policy \
-    --agents --codescan --supplychain
+    --agents --codescan --supplychain --connectors
 ```
 
-**The next session builds Part 4, the connector layer**, and it is the smaller of the two
-remaining pieces. The interfaces it replaces are deliberately narrow and already have
-their contracts fixed by tests:
+`2,991 tests passing`, 0 failing, ruff clean.
 
-| Replace | With | The constraint already in place |
-|---|---|---|
-| `SimulatedConnector.execute(action)` | real EDR / firewall / identity connectors | must refuse an action whose `requires_human_approval` is true and whose status is not `APPROVED` — `test_agents_contain.py` asserts the refusal |
-| `DraftPullRequestConnector.open_draft(action, draft)` | a real git host | must open a **draft**; the capability it must not have is a merge, and the guarantee is that `PullRequestDraft` has no non-draft state to construct |
+**The next session builds Part 5, the Analyst Copilot dashboard (F-10)** — the last PRD
+criterion. Its data sources already exist as functions (see the Part 5 section below),
+and two Part 4 findings are requirements for it: a failed action inside a completed run
+must be visible, and the router's refusals must be shown with their reasons.
 
-Start with the git connector: it is the one with a concrete spec (`PullRequestDraft`
-carries the branch, the title, the body and the validated diffs) and the one whose
-failure mode is visible rather than silent. `verify_no_ungated_execution` should keep
-returning empty against all three graphs' logs without modification — if it needs
-changing, the connector has been given authority it should not have.
-
-**Part 5 is the dashboard (F-10)**, and every data source it needs is already a function
-rather than a new query path: `CompiledGraph.pending()`, `approval_queue()`,
-`top_risk_explanations()`, `ScanResult.summary()`, `PullRequestDraft.body` and
-`HashChainedAuditLog.iter_records()`.
-
-Two standing gaps, neither blocking: **no LLM has actually been called** (`AnthropicEngine`
-is written and tested against a fake transport; every number here was produced with
-`NullEngine`), and **`mypy --strict` has not been run** because it is not installed in
-this environment.
+Standing gaps, none blocking: **no LLM has actually been called** (`AnthropicEngine` is
+tested against a fake transport; every number here was produced with `NullEngine`),
+**no connector has talked to a real service** (they are tested against strict local
+emulators of the documented APIs), and **`mypy --strict` has not been run** because it
+is not installed in this environment.
 
 ---
 
@@ -570,8 +561,9 @@ working system, not an empty one.
 - **The Triage Agent's engine is not consulted on escalations by default.** Monotone
   caution fixes the answer, so the call would buy nothing — but it does mean an LLM
   cannot *add detail* to an escalation unless `consult_engine_on_escalation=True`.
-- **`SimulatedConnector` is a stand-in.** PRD §4.1 scopes connectors as mocked for the
-  sprint, and Part 4 replaces it with the least-privilege layer. It exists here because
+- ~~**`SimulatedConnector` is a stand-in.**~~ Closed by Part 4: the real layer is
+  `sentinel.connectors`, and the stand-in stays as the hermetic default. PRD §4.1 scoped
+  connectors as mocked for the sprint. It exists here because
   F-08 needs *something* to execute in order to prove that nothing executes without
   approval.
 
@@ -867,26 +859,248 @@ Every one of these was found by a test or a measurement, not anticipated.
   deterministic either way — what is unmeasured is the quality of the narrative.
 - **`mypy --strict` still has not been run** (not installed in this environment).
 
-## Part 4 — Connector layer (Layer 5)
-Real EDR / firewall / Git / Slack connectors behind a least-privilege interface,
-replacing `SimulatedConnector` and `DraftPullRequestConnector`. The Git connector is the
-one with a concrete spec already: it takes a `PullRequestDraft` and must open it as a
-draft, so the capability it must *not* have is a merge.
+## Part 4 — Connector layer (Layer 5) ✅ COMPLETE
 
-Optionally a Semgrep-backed `StaticAnalyzer`, which the Protocol already admits. Worth
-doing for the rule breadth and the additional languages; not worth doing for F-07, which
-is met, and the hermetic analyzer should stay as the default so the one-command
-evaluation keeps working.
+Layer 5 of PRD Figure 2 and the least-privilege rule of Section 5.7. `2,991 tests
+passing` (Part 3.3 ended at 2,657), ruff clean. The three graphs call the new layer
+through the one-method interface Part 3 left for it, and **no node changed**:
+`verify_no_ungated_execution` reads the same rows it always has and still returns
+empty against all three graphs — the ledger's own test of whether this layer had been
+given authority it should not have.
+
+| PRD ref | What | Where | Verified by |
+|---|---|---|---|
+| §5.7 | Capabilities, scoped credentials, `Secret`, the connector-side F-08 check | [connectors/base.py](../src/sentinel/connectors/base.py) | `tests/unit/test_connectors_core.py` |
+| §5.7 | Egress allowlist, no redirects, bounded retries and responses | [connectors/http.py](../src/sentinel/connectors/http.py) | `tests/unit/test_connectors_core.py` (live sockets) |
+| §5.7 | Target validation and the customer's protected infrastructure | [connectors/targets.py](../src/sentinel/connectors/targets.py) | `tests/unit/test_connectors_core.py` |
+| F-04 | Execution journal (memory + SQLite) and the blast-radius ceiling | [connectors/journal.py](../src/sentinel/connectors/journal.py) | `tests/unit/test_connectors_core.py` |
+| F-07, §5.4 | Draft PRs over the git data API — no merge route exists | [connectors/github.py](../src/sentinel/connectors/github.py) | `tests/unit/test_connectors_github.py` (33) |
+| §4.2 | Wazuh active response: host isolation, IP blocks | [connectors/wazuh.py](../src/sentinel/connectors/wazuh.py) | `tests/unit/test_connectors_endpoint.py` |
+| §5.7 | SCIM 2.0 account disablement | [connectors/scim.py](../src/sentinel/connectors/scim.py) | `tests/unit/test_connectors_endpoint.py` |
+| Fig. 2 | Slack (mrkdwn-escaped), HMAC-signed webhooks, local enrichment | [connectors/notify.py](../src/sentinel/connectors/notify.py) | `tests/unit/test_connectors_endpoint.py` |
+| §5.7, F-08 | The router: tenant, approval, journal, capability, target, blast radius, audit | [connectors/router.py](../src/sentinel/connectors/router.py) | `tests/unit/test_connectors_router.py` (35) |
+| — | Live emulators of every API above, over real sockets | [connectors/sandbox.py](../src/sentinel/connectors/sandbox.py) | every connector test |
+| — | The layer built from environment variables | [connectors/config.py](../src/sentinel/connectors/config.py) | `tests/unit/test_connectors_router.py` |
+| F-07 | Composing several patches to one file into one commit | [scan/patch.py](../src/sentinel/scan/patch.py) `compose_patches` | `tests/unit/test_scan_compose.py` (64) |
+| F-04 | `CompiledGraph.recover()` — continue a run whose process died | [agents/runtime.py](../src/sentinel/agents/runtime.py) | `tests/unit/test_agents_runtime.py` |
+| Parts 1-4 | All three graphs through the real layer, one audit chain, a crash | — | `tests/integration/test_connector_pipeline.py` (23) |
+
+### Measured results
+
+From `python scripts/evaluate.py --connectors` (300 incidents, triage model on 4,000
+alerts, every approved action sent over HTTP to the sandbox; seed 20260928):
+
+```
+[incident graph over HTTP] 300 incidents, tenant 'demo'
+  gated 34 · approved 26 · rejected 8
+  blocked in Wazuh       5 address(es)       Slack messages 2
+  failed actions         0 · router refusals 0
+  state agreement        PASS (remote state == approved targets)
+
+[code scan -> GitHub]
+  PRs before approval    0 · draft PRs 1 · merges 0 · PR edits 0
+  methods on the wire    ['GET', 'POST']
+  pushed files re-scan   clean for 14 patch(es)
+  supply-chain issues    1 (before approval 0)
+  draft only             PASS
+
+[F-08 on the wire]
+  ungated executions     0 (Part 3 reader, unmodified)
+  wire before approval   0 (needs 0)
+  rejected on the wire   0 (needs 0)
+  audit chain findings   0 · credential leaks 0
+  F-08 on the wire       PASS
+
+[Section 5.7 least privilege]
+  out-of-scope probes    11/11 refused, 0 reached the remote
+  least privilege        PASS
+
+[exactly once across a crash]
+  with the SQLite journal   approved action reached Wazuh 1x
+  control, no journal       approved action reached Wazuh 2x
+  exactly once           PASS
+
+[wire] 51 request(s) · retries 0 · by connector {'slack': 2, 'wazuh': 27, 'github': 22}
+  github   p50 9.01 ms · p95 22.14 ms
+  wazuh    p50 4.77 ms · p95 18.61 ms
+```
+
+"State agreement" is checked against the **remote system**, not the connector's
+report: the addresses Wazuh says it blocked are exactly the set of approved `block_ip`
+targets, and the pull request's files, fetched back from the emulator, re-scan with
+every patched finding gone and no new one. "Wire before approval" is a stronger F-08
+than Part 3 could state: it asks whether any `connector_called` row for a gated action
+precedes that action's `approval_granted` row — i.e. whether a byte left the process
+before a human said yes.
+
+The 11 probes: `PUT .../merge`, `PATCH .../pulls/1`, `DELETE` a ref, another
+repository, a webhook-creation route, a dot-segment path, three over- or under-scoped
+tokens, a plaintext non-loopback origin, and a live `302` pointing at a second server.
+All 11 raise before the wire, and the second server receives nothing.
+
+### Deviation from the PRD, deliberately
+
+PRD Section 4.1 scopes the sprint's connectors as mocked, and F-14 ("real connector to a
+production security tool") is *Won't this sprint*. Part 4 goes one step further than
+the mock and deliberately stops short of F-14: the connectors are **real HTTP clients**
+for the documented APIs (GitHub REST `2022-11-28`, Wazuh server API 4.x, SCIM 2.0,
+Slack incoming webhooks), and they are exercised against **strict local emulators over
+real sockets** rather than against production services. The emulators refuse a missing
+token, a malformed body or a tree naming a blob nobody created, so a connector that
+misspoke the API would fail here — but they are my reading of the documentation, and
+**no request has been sent to a real Wazuh, GitHub, directory or Slack.** That is the
+first thing Part 4's successor should change, and `connectors/config.py` is the seam.
+
+Stdlib `urllib` rather than `requests`/`httpx`, for the same reason as NumPy over torch:
+the one-command install stays dependency-free, and the three behaviours that matter for
+security here — redirects, response size, timeouts — are explicit in 60 lines this repo
+owns rather than defaults in a library it does not.
+
+### The design decision that matters most: least privilege in three layers
+
+Section 5.7's *"scoped to the minimum API permissions needed for its specific action
+set, never a broad admin credential"* is three requirements, and each fails differently:
+
+1. **Capabilities** — what the connector's code will attempt. The router refuses to hand
+   a connector an action outside its declared set, and refuses to start if two
+   connectors claim one capability (which system acted would become a question the log
+   cannot answer).
+2. **Credential scopes** — what the remote system would let the token do. A connector
+   refuses at construction if the declared scopes exceed what its enabled capabilities
+   need, or omit one. Where the remote *reports* the token's real scopes (GitHub's
+   `X-OAuth-Scopes`), the report is checked against a forbidden list on the first call,
+   which is a read, so an administrator's token is refused before anything is written.
+3. **Egress routes** — what can physically leave the process. Every request passes an
+   allowlist of `(method, path-pattern)` per connector. This is the layer that holds when
+   the first two are wrong: a GitHub token with `contents:write` *can* merge a pull
+   request; this connector cannot, because no `PUT` route exists in its policy at all.
+
+### Findings during Part 4 — each changed the design
+
+Every one was found by a test or a measurement, not anticipated.
+
+1. **Two correct fixes on one line do not compose at line granularity.** The fixture's
+   `app.run(debug=True, host="0.0.0.0")` carries two seeded defects; each validated fix
+   rewrites the whole line, one flipping `debug`, the other rebinding `host`. Line-level
+   composition refused `config.py` outright. Same-range changes are now three-way merged
+   below the line.
+
+2. **…and a character-level merge wrote `host="1127.0.0.1"`.** The first version of that
+   merge worked on characters. Two *competing* rewrites of one literal — to
+   `"127.0.0.1"` in one patch and `"10.0.0.1"` in another — were aligned by the differ into
+   interleaved single-character edits that did not overlap, so the "merge" succeeded and
+   produced a valid, parseable, wrong bind address. A test written to assert that
+   competing edits *conflict* caught it. The merge is now over tokens — a string literal,
+   identifier or number is atomic — so those edits land on one token and collide. This is
+   the patch-composition version of Part 3.3's finding 3: a syntactically perfect result
+   that does the wrong thing, visible only to a test that reads the text.
+
+3. **F-04's resume covered the pause and not the crash.** Writing the journal's test
+   needed a process to die after the connector call and before the execution node
+   returned. The last checkpoint then says `RUNNING`, cursor on `execute`, and `resume()`
+   correctly refuses it — it is not waiting for anyone — so nothing could continue the run
+   and the approved action was stranded. `CompiledGraph.recover()` re-drives from the last
+   checkpoint with no human decision; a crash in the *entry* node leaves no checkpoint at
+   all, and there `invoke()` again is the recovery, which `recover()` says rather than
+   guesses. Both are tested at every node across a real SQLite file in a fresh process
+   image.
+
+4. **The journal is load-bearing, and there is a number that says so.** Recovering that
+   crash with the SQLite journal sends the approved action to Wazuh **once**; the control,
+   identical except for a fresh in-memory journal, sends it **twice**. Without the second
+   number the first proves nothing.
+
+5. **The tenant guardrail refused an entire feed, and every incident still said
+   `COMPLETED`.** The first end-to-end run routed the synthetic corpus (tenant `demo`)
+   through a router serving `acme`. Isolation worked exactly as designed — nothing reached
+   Wazuh — but a run finishes `COMPLETED` with its action `FAILED`, so the test's
+   incident-status assertion passed over a connector layer that had executed nothing. The
+   tests and the evaluation now assert on *action* status and on the router's refusal
+   list. The dashboard (Part 5) needs to surface a failed action inside a completed run;
+   the status alone hides it.
+
+6. **`urllib` forwards `Authorization` on a redirect, to any host.** Its default redirect
+   handler copies request headers to the new location. A compromised or misconfigured
+   endpoint answering `302 Location: https://elsewhere/` would receive the token. The
+   transport now refuses to follow redirects at all, and the test stands up a second live
+   server as the redirect target and asserts it is never contacted.
+
+7. **Wazuh's login is a `POST`, so a transient 503 on it failed the action.** The client
+   correctly refuses to blind-retry an unkeyed `POST`, and the connector had no way to say
+   "this one is safe" short of inventing an idempotency key for a login. `request()` now
+   takes an explicit `retryable=` override, used in exactly that one place.
+
+8. **Part 3 sends `disable_account` a host.** `_TARGET_FIELD` in `agents/contain.py` maps
+   `DISABLE_ACCOUNT` to `asset_id`, which on the network corpus is an IP address. The SCIM
+   connector now refuses an IP as an account identifier before any request — a filter for
+   `userName eq "10.0.205.66"` finds nobody at best and, in a directory that permits
+   numeric names, the wrong person at worst. The upstream mapping is unchanged (see
+   caveats): on this corpus the Containment Agent never reaches it, because brute-force
+   recommends `block_ip` first.
+
+9. **The draft carries 14 patches, not 15**, and the test that assumed otherwise was
+   wrong. `python.bind-all-interfaces` is LOW severity, validated, and below
+   `CodeScanAgent(min_patch_severity=MEDIUM)`, so it is correctly left for a human and
+   listed in `unpatched_refs`. The re-scan assertion now takes its expectation from the
+   draft rather than from every validated patch.
+
+### Honest caveats for Part 4
+
+- **No real service has been contacted.** Stated above and worth repeating here: the
+  emulators implement the documented APIs, and a real Wazuh/GitHub/SCIM/Slack may
+  disagree with my reading in ways only a real call reveals.
+- **Wazuh has no built-in isolation command.** `!firewall-drop` is a Wazuh built-in; host
+  isolation defaults to a custom active-response script named `sentinel-isolate` that the
+  customer must install, and this repository does not ship one. The command map is
+  configurable and a missing command is an error, never a silent no-op.
+- **TLS uses the system trust store.** Wazuh's API ships with a self-signed certificate
+  by default, and there is no custom-CA or pinning option on `UrllibTransport` yet — an
+  operator would have to install the CA system-wide. Small to add, not done.
+- **`kill_process` and `quarantine_file` have no connector.** The router fails closed on
+  them, which is correct and means those actions cannot run. The Containment Agent does
+  not propose them first on this corpus.
+- **No revert capability.** PRD Section 5.5.4 prices in "a false auto-contain that a human
+  later reverses"; nothing here un-isolates a host, unblocks an address or re-enables an
+  account. The reversal is a human's job in the vendor console today.
+- **Repeated blocks are not de-duplicated.** 26 approved blocks hit 5 distinct addresses
+  in the measured run, so the firewall received the same `firewall-drop` repeatedly —
+  harmless for Wazuh, but each one consumes blast-radius budget. The ceiling counts
+  actions, not distinct targets.
+- **Slack webhooks have no idempotency key**, so a retry after a timeout can post twice.
+  For a notification that is the right trade (a duplicate ping is noise, a lost one is a
+  missed incident), and it is a choice rather than an oversight.
+- **The upstream `DISABLE_ACCOUNT → asset_id` mapping is still wrong** (finding 8). The
+  connector refuses the bad target; the agent should carry an account identifier.
+- **`mypy --strict` still has not been run** (not installed in this environment).
+- **Still no LLM call.** Nothing in Part 4 depends on one — no engine output reaches a
+  connector argument.
 
 ## Part 5 — Analyst Copilot dashboard (F-10, Layer 6)
 
-Next.js + d3-force. Consumes the bus and the audit log; the three demo scenarios must
-be completable end-to-end from the UI alone. The data sources it needs already exist and
-are worth naming, because each is a function rather than a new query path:
-`CompiledGraph.pending()` for the approval queue (across all three graphs),
-`approval_queue()` for its ordering, `top_risk_explanations()` for the supply-chain map,
-`ScanResult.summary()` and `PullRequestDraft.body` for the code-scan view, and
-`HashChainedAuditLog.iter_records()` for the timeline.
+The last PRD criterion. Next.js + d3-force per the PRD; the three demo scenarios must be
+completable end-to-end from the UI alone. Every data source already exists as a function
+rather than a new query path:
+
+| View | Source |
+|---|---|
+| Approval queue (all three graphs) | `CompiledGraph.pending()`, ordered by `approval_queue()` |
+| Approve / reject | `CompiledGraph.resume(thread_id, HumanDecision(...))` |
+| Crash recovery | `CompiledGraph.recover(thread_id)` (Part 4) |
+| Investigation timeline | `HashChainedAuditLog.iter_records()` |
+| What actually happened on the wire | `connector_called` rows; `ConnectorRouter.executions` / `.refusals` (Part 4) |
+| Supply-chain map | `top_risk_explanations()`, `explain_node()` |
+| Code-scan view | `ScanResult.summary()`, `PullRequestDraft.body`, the PR `reference` URL |
+| Evaluation report (F-12) | `data/artifacts/evaluation.json` from `scripts/evaluate.py` |
+
+Two Part 4 findings are dashboard requirements, not nice-to-haves: a **failed action
+inside a completed run** must be visible (finding 5), and the **router's refusals**
+(protected target, blast radius, wrong tenant) must be shown with their reasons, because
+a guardrail that fires silently is one nobody tunes.
+
+The dashboard needs a thin HTTP API over those functions (`fastapi` is already in the
+`[api]` extra). That API is itself an outward-facing surface and gets the same treatment
+as a connector: authenticated, tenant-scoped, and every approval it records must name a
+real approver.
 
 ---
 
@@ -900,7 +1114,7 @@ python -m ruff check src tests scripts
 
 # Every acceptance gate this repo measures. Exits non-zero if any fails.
 python scripts/evaluate.py --n 20000 --cross-dataset --graph --kb --policy \
-    --agents --codescan --supplychain
+    --agents --codescan --supplychain --connectors
 
 # Or one layer at a time:
 python scripts/evaluate.py --n 20000 --cross-dataset   # F-01, F-03
@@ -910,12 +1124,14 @@ python scripts/evaluate.py --policy                    # F-09
 python scripts/evaluate.py --agents                    # F-02, F-04, F-05, F-08, §9.1
 python scripts/evaluate.py --codescan                  # F-07, and F-08 on graph 2
 python scripts/evaluate.py --supplychain               # F-06's guardrail, F-08 on graph 3
+python scripts/evaluate.py --connectors                # Part 4: Section 5.7, F-08 on the wire
 python scripts/evaluate.py --augment                   # §5.5.5
 python scripts/evaluate.py --n 20000 --shallow         # the Part 1 linear baseline
 ```
 
-No datasets, no API keys, no Redis, and no torch. Every number above is produced by
-that one script.
+No datasets, no API keys, no Redis, no torch and no outbound network — the connector
+gate starts its API emulators on `127.0.0.1`. Every number above is produced by that
+one script.
 
 ### Architecture flags worth knowing
 
@@ -939,3 +1155,9 @@ that one script.
 | `SupplyChainAgent(top_k=)` | `10` | matches F-06's own metric, and a review queue longer than a screen is one nobody finishes |
 | `SupplyChainAgent(max_hops=)` | `4` | §5.5.3's headline is a *fourth-order* dependency; the 2-layer GNN cannot see that far (Part 2 finding 10) but the graph walk can |
 | `build_supply_chain_review_graph(step_budget=)` | `8` | as above: three nodes |
+| `ConnectorRouter(limiter=)` | `None` in code, 25/hour from `router_from_env` | a ceiling someone chose on how many hosts can go offline before a human notices |
+| `RetryPolicy(max_retry_after=)` | `30s` | a longer `Retry-After` fails now rather than parking the graph thread |
+| `UrllibTransport(max_response_bytes=)` | `1 MiB` | a connector reads kilobytes of JSON; a hostile endpoint should cost nothing |
+| `EgressPolicy(allow_insecure_loopback=)` | `False` | plaintext only to an explicitly allowed `127.0.0.1` sandbox, never to a real host |
+| `WazuhConnector(commands=)` | `!firewall-drop`, `sentinel-isolate` | the first is a Wazuh built-in; the second is a customer-installed script (Part 4 caveat) |
+| `GitHubConnector(capabilities=)` | `pr.open_draft` only | issues need `issues:write`, granted only when the supply-chain route is wanted |

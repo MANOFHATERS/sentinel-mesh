@@ -21,6 +21,8 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+import contextlib
+
 import numpy as np
 
 from sentinel.ml.anomaly import build_default_ensemble
@@ -1425,6 +1427,481 @@ def run_supplychain_agent(*, seed: int, top_k: int) -> dict[str, Any]:
     }
 
 
+def run_connectors(*, n: int, seed: int, incidents: int) -> dict[str, Any]:
+    """Evaluate the connector layer (Part 4: PRD Figure 2 Layer 5, Section 5.7, F-08).
+
+    All three graphs run through :class:`~sentinel.connectors.router.ConnectorRouter`
+    in front of the Wazuh, SCIM, GitHub and Slack connectors, speaking HTTP to the
+    local emulators in :mod:`sentinel.connectors.sandbox`. Every effect is checked
+    against the *remote system's* state rather than the connector's own report, and
+    F-08 is re-read from the audit chain with one extra, stronger question: did any
+    connector touch the wire for a gated action before its approval row?
+
+    Five gates:
+
+    *   ``s57_least_privilege_pass`` — every out-of-scope request (merge, PR edit,
+        another repository, a plaintext origin, a redirect) and every over-scoped
+        credential is refused, with zero requests reaching the emulators.
+    *   ``f08_wire_pass`` — ``verify_no_ungated_execution`` is empty, no
+        ``connector_called`` row for a gated action precedes its grant, and no
+        rejected action produced a single request.
+    *   ``state_agreement_pass`` — the hosts isolated and addresses blocked in Wazuh
+        are exactly the approved targets; no action failed; the router refused none.
+    *   ``draft_only_pass`` — one draft PR, zero merges, zero PR edits, only GET and
+        POST on the wire, and the pushed files re-scan with the patched findings gone.
+    *   ``exactly_once_pass`` — a process killed between the connector call and the
+        checkpoint recovers with the host isolated once; the control without the
+        durable journal isolates it twice.
+    """
+    import tempfile
+    from datetime import UTC, datetime, timedelta
+    from pathlib import Path as _Path
+
+    from sentinel.agents.checkpoint import SqliteCheckpointer
+    from sentinel.agents.codescan import (
+        CodeScanAgent,
+        build_code_scan_graph,
+        new_code_scan_incident,
+        synthesize_scan_alert,
+    )
+    from sentinel.agents.contain import ContainmentAgent, verify_no_ungated_execution
+    from sentinel.agents.investigate import InvestigationAgent
+    from sentinel.agents.orchestrator import build_incident_graph, new_incident
+    from sentinel.agents.state import HumanDecision, IncidentStatus
+    from sentinel.agents.supplychain import (
+        SupplyChainAgent,
+        SupplyChainMonitor,
+        build_supply_chain_review_graph,
+    )
+    from sentinel.agents.triage import TriageAgent, TriageModel
+    from sentinel.audit.log import HashChainedAuditLog
+    from sentinel.connectors.base import Capability, Credential, Secret
+    from sentinel.connectors.github import GitHubConnector
+    from sentinel.connectors.http import EgressPolicy, HttpError, Route, ScopedHttpClient
+    from sentinel.connectors.journal import BlastRadiusLimiter, MemoryJournal, SqliteJournal
+    from sentinel.connectors.sandbox import EmulatedService, LiveServer, Sandbox
+    from sentinel.core.clock import SimulationClock
+    from sentinel.core.errors import GuardrailViolation
+    from sentinel.core.schemas import ActionType, ApprovalStatus, AuditEventType
+    from sentinel.graph.gnn import GraphSplit, SupplyChainGNN
+    from sentinel.graph.synthetic import SyntheticGraphGenerator
+    from sentinel.kb.retrieve import KnowledgeBase
+    from sentinel.ml.metrics import four_way_split
+    from sentinel.scan.analyzer import AstAnalyzer
+    from sentinel.scan.repo import RepoSnapshot
+    from sentinel.scan.seeded import FIXTURE_DIR
+
+    print()
+    print("=" * 72)
+    print("Layer 5 - connectors (Part 4: Section 5.7 least privilege, F-08 on the wire)")
+    print("=" * 72)
+
+    alerts = generate_alerts(n, seed=seed)
+    y = labels_of(alerts)
+    split = four_way_split(y, seed=seed)
+    model = TriageModel.fit(
+        [alerts[i] for i in split.train_benign],
+        train_labelled=[alerts[i] for i in split.train_labelled],
+        validation=[alerts[i] for i in split.validation],
+        seed=seed,
+    )
+    feed = [alerts[i] for i in split.test][:incidents]
+    tenant = feed[0].tenant_id
+    kb = KnowledgeBase.build()
+    snapshot = RepoSnapshot.from_dir(FIXTURE_DIR)
+    graph, truth = SyntheticGraphGenerator(seed=seed).generate()
+    node_ids = graph.node_ids()
+    node_labels = truth.labels(node_ids)
+    gnn = SupplyChainGNN(random_state=seed).fit(
+        graph, node_labels, GraphSplit.stratified(node_labels, seed=seed),
+        exposure=truth.risk_vector(node_ids),
+    )
+    scores = gnn.risk_scores(graph)
+
+    temp_dir = _Path(tempfile.mkdtemp(prefix="sentinel-connectors-"))
+    clock = SimulationClock(datetime(2026, 9, 29, 9, 0, 0, tzinfo=UTC))
+    log = HashChainedAuditLog(temp_dir / "audit.sqlite", clock=clock)
+    sandbox = Sandbox(
+        repo_files={f.path: f.text for f in snapshot.files},
+        hosts=[a.asset_id for a in feed],
+        clock=clock,
+    ).start()
+    journal = SqliteJournal(temp_dir / "journal.sqlite")
+    router = sandbox.router(
+        tenant_id=tenant,
+        audit=log,
+        journal=journal,
+        limiter=BlastRadiusLimiter(max_actions=max(25, incidents), window=timedelta(hours=1),
+                                   clock=clock),
+    )
+
+    # --- graph 1: the alert feed -----------------------------------------------
+    incident_graph = build_incident_graph(
+        triage=TriageAgent(model=model, clock=clock),
+        investigation=InvestigationAgent(kb=kb, clock=clock),
+        containment=ContainmentAgent(clock=clock),
+        connector=router,
+    )
+    gated = approved = rejected = 0
+    approved_targets: dict[ActionType, set[str]] = {}
+    rejected_ids: set[str] = set()
+    failed_actions: list[str] = []
+    for index, alert in enumerate(feed):
+        run = incident_graph.invoke(new_incident(alert, at=clock.now()), clock=clock, audit=log)
+        if run.interrupted:
+            gated += 1
+            pending = run.state.actions[-1]
+            approve = gated % 4 != 0  # every fourth gated action is rejected
+            clock.advance(12.0)
+            run = incident_graph.resume(
+                run.state.incident_id,
+                HumanDecision(approver="soc@acme", approved=approve, decided_at=clock.now()),
+                clock=clock, audit=log,
+            )
+            if approve:
+                approved += 1
+                approved_targets.setdefault(pending.action_type, set()).add(pending.target)
+            else:
+                rejected += 1
+                rejected_ids.add(pending.action_id)
+        failed_actions += [
+            f"{a.action_type.value}: {a.failure_reason}"
+            for a in run.state.actions
+            if a.approval_status is ApprovalStatus.FAILED
+        ]
+        del index
+
+    # --- graph 2: a code scan ---------------------------------------------------
+    code_graph = build_code_scan_graph(
+        agent=CodeScanAgent(kb=kb, clock=clock), snapshot=snapshot, connector=router
+    )
+    scan_alert = synthesize_scan_alert(snapshot, tenant_id=tenant, repository="acme/billing",
+                                       at=clock.now(), commit="HEAD")
+    draft = CodeScanAgent(kb=kb, clock=clock).assess(
+        snapshot, alert=scan_alert, now=clock.now()
+    ).draft
+    scan_run = code_graph.invoke(new_code_scan_incident(scan_alert, at=clock.now()),
+                                 clock=clock, audit=log)
+    prs_before_approval = len(sandbox.github.pulls)
+    if scan_run.interrupted:
+        clock.advance(25.0)
+        scan_run = code_graph.resume(
+            scan_run.state.incident_id,
+            HumanDecision(approver="dev@acme", approved=True, decided_at=clock.now()),
+            clock=clock, audit=log,
+        )
+
+    # --- graph 3: a scheduled supply-chain review --------------------------------
+    supply_agent = SupplyChainAgent(kb=kb, clock=clock)
+    review_graph = build_supply_chain_review_graph(
+        agent=supply_agent, graph=graph, model=gnn, scores=scores, connector=router
+    )
+    monitor = SupplyChainMonitor(agent=supply_agent, graph=graph, model=gnn, scores=scores,
+                                 clock=clock)
+    vendor_run = monitor.tick(tenant_id=tenant, compiled=review_graph, audit=log,
+                              assessment_id="2026-09-29")
+    issues_before_approval = len(sandbox.github.issues)
+    if vendor_run.interrupted:
+        clock.advance(45.0)
+        vendor_run = review_graph.resume(
+            vendor_run.state.incident_id,
+            HumanDecision(approver="vciso@acme", approved=True, decided_at=clock.now()),
+            clock=clock, audit=log,
+        )
+
+    records = list(log.iter_records())
+    calls = [r for r in records if r.event_type is AuditEventType.CONNECTOR_CALLED]
+
+    # --- F-08 on the wire ---------------------------------------------------------
+    granted: dict[str, int] = {}
+    wire_before_approval = 0
+    for record in records:
+        if record.event_type is AuditEventType.APPROVAL_GRANTED:
+            granted.setdefault(record.subject_id, record.seq)
+        elif (record.event_type is AuditEventType.CONNECTOR_CALLED
+              and record.payload.get("requires_human_approval")
+              and granted.get(record.subject_id, 10**12) > record.seq):
+            wire_before_approval += 1
+    touched = {r.subject_id for r in calls}
+    rejected_on_wire = len(rejected_ids & touched)
+    ungated = verify_no_ungated_execution(log)
+    chain = log.verify()
+
+    # --- state agreement ------------------------------------------------------------
+    isolated_ok = sandbox.wazuh.isolated_hosts() == approved_targets.get(
+        ActionType.ISOLATE_HOST, set()
+    )
+    blocked_ok = sandbox.wazuh.blocked_addresses() == approved_targets.get(
+        ActionType.BLOCK_IP, set()
+    )
+
+    # --- draft PR ---------------------------------------------------------------------
+    github = sandbox.github
+    analyzer = AstAnalyzer()
+    rescan_ok = draft is not None and len(github.pulls) == 1
+    if rescan_ok:
+        for file in snapshot.files:
+            pushed = github.file_at(draft.branch, file.path)
+            if pushed is None:
+                rescan_ok = False
+                break
+            before = analyzer.rule_counts(file)
+            after = analyzer.rule_counts(file.with_text(pushed))
+            for patch_rule in {p.rule_id for p in draft.patches if p.path == file.path}:
+                fixed = sum(1 for p in draft.patches
+                            if p.path == file.path and p.rule_id == patch_rule)
+                if after.get(patch_rule, 0) != before[patch_rule] - fixed:
+                    rescan_ok = False
+            if any(count > before.get(rule, 0) for rule, count in after.items()):
+                rescan_ok = False
+
+    # --- secrets --------------------------------------------------------------------
+    rendered = " ".join(repr(r.payload) for r in records)
+    secret_leaks = sum(1 for value in sandbox._secrets.values() if value in rendered)
+    secret_leaks += rendered.count("Bearer ") + rendered.count("Basic ")
+
+    # --- least-privilege probes ---------------------------------------------------------
+    probes_denied = 0
+    probes_total = 0
+    before_probe = len(github.requests)
+    probe_connector = sandbox.github_connector()
+    for method, path in (
+        ("PUT", "/repos/acme/billing/pulls/1/merge"),
+        ("PATCH", "/repos/acme/billing/pulls/1"),
+        ("DELETE", "/repos/acme/billing/git/refs/heads/main"),
+        ("GET", "/repos/acme/other-repo"),
+        ("POST", "/repos/acme/billing/hooks"),
+        ("GET", "/repos/acme/billing/git/ref/heads/../../../admin"),
+    ):
+        probes_total += 1
+        try:
+            probe_connector.http.request(method, path)
+        except GuardrailViolation:
+            probes_denied += 1
+    for scopes in (
+        {"contents:write", "pull_requests:write", "administration:write"},
+        {"contents:write", "pull_requests:write", "workflow"},
+        {"contents:write"},
+    ):
+        probes_total += 1
+        try:
+            GitHubConnector(owner="acme", repo="billing",
+                            credential=Credential(Secret("x"), frozenset(scopes)),
+                            capabilities=(Capability.PR_OPEN_DRAFT,))
+        except GuardrailViolation:
+            probes_denied += 1
+    probes_total += 1
+    try:
+        EgressPolicy("http://wazuh.example:55000", (Route("r", "GET", "/"),),
+                     allow_insecure_loopback=True)
+    except GuardrailViolation:
+        probes_denied += 1
+
+    class _Redirect(EmulatedService):
+        def route(self, request):
+            return 302, {"Location": "http://127.0.0.1:9/steal"}, b""
+
+    probes_total += 1
+    with LiveServer(_Redirect()) as redirector:
+        client = ScopedHttpClient(
+            connector="probe",
+            policy=EgressPolicy(redirector.url, (Route("r", "GET", "/x"),),
+                                allow_insecure_loopback=True),
+            auth=lambda: {"Authorization": "Bearer probe"},
+        )
+        try:
+            client.request("GET", "/x")
+        except HttpError:
+            probes_denied += 1
+    probes_reached_remote = len(github.requests) - before_probe
+
+    sandbox.stop()
+    journal.close()
+    log.close()
+
+    # --- exactly once across a crash ----------------------------------------------------
+    class _Crash(BaseException):
+        pass
+
+    class _CrashAfterGatedCall:
+        def __init__(self, inner):
+            self.inner = inner
+            self.armed = True
+
+        def execute(self, action):
+            outcome = self.inner.execute(action)
+            if self.armed and action.requires_human_approval:
+                self.armed = False
+                raise _Crash
+            return outcome
+
+    def crash_and_recover(durable: bool) -> int:
+        work = _Path(tempfile.mkdtemp(prefix="sentinel-crash-"))
+        crash_clock = SimulationClock(datetime(2026, 9, 29, 9, 0, 0, tzinfo=UTC))
+        crash_log = HashChainedAuditLog(work / "audit.sqlite", clock=crash_clock)
+        box = Sandbox(hosts=[a.asset_id for a in feed], clock=crash_clock).start()
+
+        def build(connector, store):
+            return build_incident_graph(
+                triage=TriageAgent(model=model, clock=crash_clock),
+                investigation=InvestigationAgent(kb=kb, clock=crash_clock),
+                containment=ContainmentAgent(clock=crash_clock),
+                connector=connector,
+                checkpointer=store,
+            )
+
+        try:
+            j1 = SqliteJournal(work / "j.sqlite") if durable else MemoryJournal()
+            with SqliteCheckpointer(work / "cp.sqlite") as store:
+                g = build(_CrashAfterGatedCall(box.router(tenant_id=tenant, audit=crash_log,
+                                                          journal=j1)), store)
+                paused = None
+                for alert in feed:
+                    run = g.invoke(new_incident(alert, at=crash_clock.now()),
+                                   clock=crash_clock, audit=crash_log)
+                    if run.interrupted:
+                        paused = run
+                        break
+                assert paused is not None, "no gated incident in the feed"
+                crash_clock.advance(12.0)
+                with contextlib.suppress(_Crash):
+                    g.resume(paused.state.incident_id,
+                             HumanDecision(approver="soc@acme", approved=True,
+                                           decided_at=crash_clock.now()),
+                             clock=crash_clock, audit=crash_log)
+            if durable:
+                j1.close()
+            j2 = SqliteJournal(work / "j.sqlite") if durable else MemoryJournal()
+            with SqliteCheckpointer(work / "cp.sqlite") as store:
+                g = build(box.router(tenant_id=tenant, audit=crash_log, journal=j2), store)
+                recovered = g.recover(paused.state.incident_id, clock=crash_clock,
+                                      audit=crash_log)
+                assert recovered.state.status is IncidentStatus.COMPLETED
+            if durable:
+                j2.close()
+            return len(box.wazuh.executed)
+        finally:
+            box.stop()
+            crash_log.close()
+
+    runs_with_journal = crash_and_recover(True)
+    runs_without = crash_and_recover(False)
+
+    # --- report ---------------------------------------------------------------------
+    by_connector: dict[str, int] = {}
+    retries = 0
+    durations: dict[str, list[float]] = {}
+    for record in calls:
+        name = str(record.payload["connector"])
+        by_connector[name] = by_connector.get(name, 0) + 1
+        retries += int(record.payload["attempt"]) > 1
+        durations.setdefault(name, []).append(float(record.payload["duration_ms"]))
+    latency = {
+        name: {
+            "p50_ms": float(np.percentile(values, 50)),
+            "p95_ms": float(np.percentile(values, 95)),
+        }
+        for name, values in durations.items()
+    }
+
+    least_privilege_pass = probes_denied == probes_total and probes_reached_remote == 0
+    f08_wire_pass = (
+        not ungated and wire_before_approval == 0 and rejected_on_wire == 0
+        and not chain.findings and gated > 0 and rejected > 0
+    )
+    state_pass = isolated_ok and blocked_ok and not failed_actions and not router.refusals
+    draft_pass = (
+        rescan_ok and prs_before_approval == 0 and github.merges == 0
+        and github.pull_edits == 0
+        and {r.method for r in github.requests} <= {"GET", "POST"}
+        and bool(github.pulls) and github.pulls[0]["draft"] is True
+        and scan_run.state.status is IncidentStatus.COMPLETED
+        and issues_before_approval == 0 and len(github.issues) == 1
+        and vendor_run.state.status is IncidentStatus.COMPLETED
+    )
+    exactly_once_pass = runs_with_journal == 1 and runs_without == 2
+
+    print()
+    print(f"[incident graph over HTTP] {len(feed)} incidents, tenant {tenant!r}")
+    print(f"  gated {gated} · approved {approved} · rejected {rejected}")
+    print(f"  isolated in Wazuh      {sorted(sandbox.wazuh.isolated_hosts())}")
+    print(f"  blocked in Wazuh       {len(sandbox.wazuh.blocked_addresses())} address(es)")
+    print(f"  Slack messages         {len(sandbox.slack.messages)}")
+    print(f"  failed actions         {len(failed_actions)} · router refusals "
+          f"{len(router.refusals)}")
+    print(f"  state agreement        {'PASS' if state_pass else 'FAIL'} "
+          "(remote state == approved targets)")
+    print()
+    print("[code scan -> GitHub]")
+    print(f"  PRs before approval    {prs_before_approval} · draft PRs {len(github.pulls)} · "
+          f"merges {github.merges} · PR edits {github.pull_edits}")
+    print(f"  methods on the wire    {sorted({r.method for r in github.requests})}")
+    print(f"  pushed files re-scan   {'clean' if rescan_ok else 'NOT clean'} for "
+          f"{0 if draft is None else len(draft.patches)} patch(es)")
+    print(f"  supply-chain issues    {len(github.issues)} (before approval "
+          f"{issues_before_approval})")
+    print(f"  draft only             {'PASS' if draft_pass else 'FAIL'}")
+    print()
+    print("[F-08 on the wire]")
+    print(f"  ungated executions     {len(ungated)} (Part 3 reader, unmodified)")
+    print(f"  wire before approval   {wire_before_approval} (needs 0)")
+    print(f"  rejected on the wire   {rejected_on_wire} (needs 0)")
+    print(f"  audit chain findings   {len(chain.findings)}")
+    print(f"  credential leaks       {secret_leaks} (needs 0)")
+    print(f"  F-08 on the wire       {'PASS' if f08_wire_pass and not secret_leaks else 'FAIL'}")
+    print()
+    print("[Section 5.7 least privilege]")
+    print(f"  out-of-scope probes    {probes_denied}/{probes_total} refused, "
+          f"{probes_reached_remote} reached the remote")
+    print(f"  least privilege        {'PASS' if least_privilege_pass else 'FAIL'}")
+    print()
+    print("[exactly once across a crash]")
+    print(f"  with the SQLite journal   approved action reached Wazuh {runs_with_journal}x")
+    print(f"  control, no journal       approved action reached Wazuh {runs_without}x")
+    print(f"  exactly once           {'PASS' if exactly_once_pass else 'FAIL'}")
+    print()
+    print(f"[wire] {len(calls)} request(s) · retries {retries} · by connector {by_connector}")
+    for name, stats in sorted(latency.items()):
+        print(f"  {name:<8} p50 {stats['p50_ms']:.2f} ms · p95 {stats['p95_ms']:.2f} ms")
+
+    return {
+        "incidents": len(feed),
+        "tenant": tenant,
+        "gated": gated,
+        "approved": approved,
+        "rejected": rejected,
+        "failed_actions": failed_actions,
+        "router_refusals": len(router.refusals),
+        "isolated_hosts": sorted(sandbox.wazuh.isolated_hosts()),
+        "blocked_addresses": len(sandbox.wazuh.blocked_addresses()),
+        "slack_messages": len(sandbox.slack.messages),
+        "draft_prs": len(github.pulls),
+        "merges": github.merges,
+        "pull_edits": github.pull_edits,
+        "issues": len(github.issues),
+        "rescan_clean": rescan_ok,
+        "ungated_executions": list(ungated),
+        "wire_before_approval": wire_before_approval,
+        "rejected_on_wire": rejected_on_wire,
+        "audit_findings": len(chain.findings),
+        "credential_leaks": secret_leaks,
+        "probes_total": probes_total,
+        "probes_denied": probes_denied,
+        "probes_reached_remote": probes_reached_remote,
+        "crash_runs_with_journal": runs_with_journal,
+        "crash_runs_without_journal": runs_without,
+        "wire_requests": len(calls),
+        "wire_retries": retries,
+        "wire_by_connector": by_connector,
+        "wire_latency": latency,
+        "s57_least_privilege_pass": least_privilege_pass,
+        "f08_wire_pass": f08_wire_pass and secret_leaks == 0,
+        "state_agreement_pass": state_pass,
+        "draft_only_pass": draft_pass,
+        "exactly_once_pass": exactly_once_pass,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Sentinel Mesh offline evaluation")
     parser.add_argument("--n", type=int, default=20000, help="alerts to generate")
@@ -1497,6 +1974,24 @@ def main() -> int:
         action="store_true",
         help="run the Supply-Chain Agent over the risk graph (F-06's guardrail)",
     )
+    parser.add_argument(
+        "--connectors",
+        action="store_true",
+        help="drive all three graphs through the real connector layer against the local "
+        "API emulators (Part 4: Section 5.7, F-08 on the wire)",
+    )
+    parser.add_argument(
+        "--connector-alerts",
+        type=int,
+        default=4000,
+        help="alerts to generate for the --connectors triage model",
+    )
+    parser.add_argument(
+        "--connector-incidents",
+        type=int,
+        default=300,
+        help="incidents to drive through the real connectors for --connectors",
+    )
     parser.add_argument("--out", type=Path, default=Path("data/artifacts/evaluation.json"))
     args = parser.parse_args()
 
@@ -1526,6 +2021,11 @@ def main() -> int:
     if args.supplychain:
         result["supply_chain_agent"] = run_supplychain_agent(
             seed=args.seed, top_k=args.top_k
+        )
+
+    if args.connectors:
+        result["connectors"] = run_connectors(
+            n=args.connector_alerts, seed=args.seed, incidents=args.connector_incidents
         )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -1577,6 +2077,18 @@ def main() -> int:
                 "f06_grounding_pass",
                 "f08_third_graph_pass",
                 "routing_pass",
+            )
+        )
+    if args.connectors:
+        connectors = result["connectors"]
+        passed = passed and all(
+            bool(connectors[gate])
+            for gate in (
+                "s57_least_privilege_pass",
+                "f08_wire_pass",
+                "state_agreement_pass",
+                "draft_only_pass",
+                "exactly_once_pass",
             )
         )
     return 0 if passed else 1

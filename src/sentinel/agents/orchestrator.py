@@ -58,6 +58,7 @@ from sentinel.agents.runtime import CompiledGraph, GraphSpec, RunContext
 from sentinel.agents.state import END, IncidentState, IncidentStatus, StepOutcome
 from sentinel.agents.triage import TriageAgent
 from sentinel.audit.log import HashChainedAuditLog
+from sentinel.connectors.base import ExecutesActions
 from sentinel.core.errors import SentinelError
 from sentinel.core.ids import deterministic_id
 from sentinel.core.schemas import (
@@ -300,7 +301,7 @@ def _approve_node():
     return node
 
 
-def _execute_node(connector: SimulatedConnector):
+def _execute_node(connector: ExecutesActions):
     def node(state: IncidentState, ctx: RunContext) -> IncidentState:
         action = _executable(state)
         if action is None:
@@ -409,7 +410,7 @@ def build_incident_graph(
     triage: TriageAgent,
     investigation: InvestigationAgent,
     containment: ContainmentAgent,
-    connector: SimulatedConnector | None = None,
+    connector: ExecutesActions | None = None,
     checkpointer=None,
     step_budget: int = 16,
 ) -> CompiledGraph:

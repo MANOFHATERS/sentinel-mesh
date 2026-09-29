@@ -56,7 +56,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Final
+from typing import Any, Final, Protocol
 
 from sentinel.agents.contain import executable_action, pending_action
 from sentinel.agents.engine import (
@@ -831,6 +831,12 @@ def _audit(
         )
 
 
+class OpensDraftPullRequests(Protocol):
+    """What the ``open_pr`` node needs. The Part 3 stand-in and the Part 4 router fit."""
+
+    def open_draft(self, action: ActionRequest, draft: PullRequestDraft) -> Any: ...
+
+
 @dataclass(slots=True)
 class DraftPullRequestConnector:
     """A mocked git host, per PRD Section 4.1's explicit connector scope.
@@ -847,7 +853,9 @@ class DraftPullRequestConnector:
 
     There is no ``merge`` method. PRD Section 5.4 requires patches to be *"opened as
     draft PRs for human merge, never auto-merged"*, and the way to guarantee that is
-    for the capability not to exist.
+    for the capability not to exist. Part 4's real
+    :class:`~sentinel.connectors.github.GitHubConnector` carries the same guarantee
+    into the network layer: its egress allowlist has no route that could merge.
     """
 
     opened: list[tuple[ActionRequest, PullRequestDraft]] = field(default_factory=list)
@@ -1032,7 +1040,7 @@ def _approve_node():
 
 
 def _open_pr_node(
-    connector: DraftPullRequestConnector,
+    connector: OpensDraftPullRequests,
     agent: CodeScanAgent,
     snapshot: RepoSnapshot,
     cache: dict[str, object],
@@ -1179,7 +1187,7 @@ def build_code_scan_graph(
     *,
     agent: CodeScanAgent,
     snapshot: RepoSnapshot,
-    connector: DraftPullRequestConnector | None = None,
+    connector: OpensDraftPullRequests | None = None,
     checkpointer=None,
     step_budget: int = CODE_SCAN_STEP_BUDGET,
 ) -> CompiledGraph:
