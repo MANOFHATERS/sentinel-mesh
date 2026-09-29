@@ -71,6 +71,8 @@ __all__ = [
     "SimulationError",
     "aggregate",
     "assert_f09_gates",
+    "asset_criticality",
+    "build_context",
     "build_episodes",
     "replay",
     "replay_many_seeds",
@@ -222,23 +224,7 @@ def build_episodes(
         observed = float(
             np.clip(true_score + rng.normal(0.0, score_noise), 0.0, 1.0)
         )
-        severity = _severity_rank(alert)
-        flow_burst = _feature(alert, "src_flow_count_window", default=0.0, scale=20.0)
-        port_rarity = _feature(alert, "dst_port_rarity", default=0.5, scale=1.0)
-
-        context = np.asarray(
-            [
-                1.0,
-                observed,
-                observed * observed,
-                severity,
-                criticality,
-                criticality * observed,
-                flow_burst,
-                port_rarity,
-            ],
-            dtype=DTYPE,
-        )
+        context = build_context(alert, anomaly_score=observed, criticality=criticality)
         episodes.append(
             Episode(
                 context=context,
@@ -250,6 +236,59 @@ def build_episodes(
             )
         )
     return tuple(episodes)
+
+
+def build_context(
+    alert: Alert, *, anomaly_score: float, criticality: float | None = None
+) -> npt.NDArray[np.float64]:
+    """The policy's observation vector, in one place.
+
+    Both the offline replay (:func:`build_episodes`) and the live Containment
+    Agent call this. That is not tidiness — it is the same discipline PRD Section
+    7.3 applies to the feature store, for the same reason. A bandit whose
+    posteriors were learned over one arrangement of eight numbers and is then
+    served a different arrangement does not fail; it returns confident nonsense,
+    because a linear model has no way to notice that ``severity`` and
+    ``criticality`` swapped places. There is therefore exactly one construction
+    of this vector, and :data:`CONTEXT_SPEC` names its entries in order.
+
+    ``criticality`` defaults to :func:`_criticality_for`, which derives it from
+    the asset id, so the live path and the replay agree on what a given asset is
+    worth without a shared inventory service.
+    """
+    if not 0.0 <= anomaly_score <= 1.0:
+        raise SimulationError(
+            f"anomaly_score {anomaly_score} outside [0, 1]; the policy's posteriors "
+            "were learned over a bounded score and an unbounded one silently "
+            "rescales every arm"
+        )
+    weight = _criticality_for(alert.asset_id) if criticality is None else float(criticality)
+    if not 0.0 <= weight <= 1.0:
+        raise SimulationError(f"criticality {weight} outside [0, 1]")
+    vector = np.asarray(
+        [
+            1.0,
+            anomaly_score,
+            anomaly_score * anomaly_score,
+            _severity_rank(alert),
+            weight,
+            weight * anomaly_score,
+            _feature(alert, "src_flow_count_window", default=0.0, scale=20.0),
+            _feature(alert, "dst_port_rarity", default=0.5, scale=1.0),
+        ],
+        dtype=DTYPE,
+    )
+    if vector.shape != (N_FEATURES,):  # pragma: no cover - guarded by CONTEXT_SPEC
+        raise SimulationError(
+            f"context has shape {vector.shape}, but CONTEXT_SPEC names {N_FEATURES} "
+            "features; the two have drifted apart"
+        )
+    return vector
+
+
+def asset_criticality(asset_id: str) -> float:
+    """Public name for the asset-criticality derivation (PRD Section 5.5.4)."""
+    return _criticality_for(asset_id)
 
 
 def _severity_rank(alert: Alert) -> float:

@@ -41,8 +41,10 @@ __all__ = [
     "SOC_ATTACK_BASE_RATE",
     "DetectionReport",
     "SplitIndices",
+    "TriageSplit",
     "average_precision",
     "detection_report",
+    "four_way_split",
     "precision_recall_f1",
     "recall_by_class",
     "roc_auc",
@@ -438,6 +440,149 @@ def three_way_split(
 
     return SplitIndices(
         train_benign=np.sort(train_benign),
+        validation=np.sort(np.concatenate([val_benign, val_attack])),
+        test=np.sort(np.concatenate([test_benign, test_attack])),
+    )
+
+
+@dataclass(frozen=True)
+class TriageSplit:
+    """Four disjoint index arrays: two training sets, validation, test.
+
+    :func:`three_way_split` is correct for the Section 5.5.2 detectors, which are
+    semi-supervised and must never see an attack while fitting — so it puts every
+    attack into validation and test. The Triage Agent (F-02) additionally carries
+    a *supervised* family classifier, and a supervised model needs labelled
+    attacks in its training set. Reusing the three-way split for both would mean
+    fitting the classifier on validation or test data, which is exactly the leak
+    the three-way split exists to prevent.
+
+    So there are two training sets rather than one:
+
+    ``train_benign``
+        Benign only. Fits the vectorizer and the novelty detectors.
+    ``train_labelled``
+        Benign and attacks. Fits the family classifier, and — because it is
+        disjoint from ``train_benign`` — also gives the
+        :class:`~sentinel.ml.robustness.NoveltyGate` a reference quantile
+        measured on rows the detector did not fit on, which is the unbiased
+        version of that quantity.
+
+    Disjointness across all four is asserted at construction, over every pair, so
+    a future edit to the sampling logic cannot quietly reintroduce an overlap.
+    """
+
+    train_benign: np.ndarray
+    train_labelled: np.ndarray
+    validation: np.ndarray
+    test: np.ndarray
+
+    def __post_init__(self) -> None:
+        sets = {
+            "train_benign": set(self.train_benign.tolist()),
+            "train_labelled": set(self.train_labelled.tolist()),
+            "validation": set(self.validation.tolist()),
+            "test": set(self.test.tolist()),
+        }
+        names = list(sets)
+        for index, left in enumerate(names):
+            for right in names[index + 1 :]:
+                overlap = sets[left] & sets[right]
+                if overlap:
+                    raise ValueError(
+                        f"{left} and {right} splits overlap on {len(overlap)} "
+                        f"index/indices (e.g. {sorted(overlap)[:5]}); every metric "
+                        "computed from this split would be contaminated"
+                    )
+
+    @property
+    def sizes(self) -> dict[str, int]:
+        return {
+            "train_benign": int(self.train_benign.size),
+            "train_labelled": int(self.train_labelled.size),
+            "validation": int(self.validation.size),
+            "test": int(self.test.size),
+        }
+
+
+def four_way_split(
+    labels: Sequence[int] | np.ndarray,
+    *,
+    seed: int = 20260929,
+    labelled_fraction: float = 0.35,
+    validation_fraction: float = 0.2,
+    test_fraction: float = 0.3,
+    benign_label: int = 0,
+) -> TriageSplit:
+    """Split for a pipeline that fits both a novelty detector and a classifier.
+
+    Benign rows are divided four ways; attacks are divided three ways
+    (``train_labelled``, ``validation``, ``test``) and never reach
+    ``train_benign``, which is what keeps the novelty detectors semi-supervised.
+
+    The fractions are of the *whole* corpus for validation and test, and of the
+    attack pool for ``labelled_fraction``. Every split is stratified so the
+    positive rate is comparable across the three that carry attacks.
+    """
+    y = np.asarray(labels).ravel().astype(int)
+    if y.size == 0:
+        raise ValueError("cannot split an empty label vector")
+    for name, value in (
+        ("labelled_fraction", labelled_fraction),
+        ("validation_fraction", validation_fraction),
+        ("test_fraction", test_fraction),
+    ):
+        if not 0.0 < value < 1.0:
+            raise ValueError(f"{name} must be in (0, 1), got {value}")
+    if labelled_fraction + validation_fraction + test_fraction >= 1.0:
+        raise ValueError(
+            "labelled, validation and test fractions must leave benign data for the "
+            "benign-only training split"
+        )
+
+    rng = np.random.default_rng(seed)
+    benign_idx = np.flatnonzero(y == benign_label)
+    attack_idx = np.flatnonzero(y != benign_label)
+    if benign_idx.size < 4:
+        raise ValueError(
+            f"need at least 4 benign samples to split four ways, got {benign_idx.size}"
+        )
+    if attack_idx.size < 3:
+        raise ValueError(
+            f"need at least 3 attack samples to populate the labelled, validation and "
+            f"test splits, got {attack_idx.size}"
+        )
+
+    rng.shuffle(benign_idx)
+    rng.shuffle(attack_idx)
+
+    n_benign = benign_idx.size
+    n_lab_benign = max(1, round(n_benign * labelled_fraction))
+    n_val_benign = max(1, round(n_benign * validation_fraction))
+    n_test_benign = max(1, round(n_benign * test_fraction))
+    if n_lab_benign + n_val_benign + n_test_benign >= n_benign:
+        n_test_benign = max(1, n_benign - n_lab_benign - n_val_benign - 1)
+
+    cut_a = n_lab_benign
+    cut_b = cut_a + n_val_benign
+    cut_c = cut_b + n_test_benign
+    lab_benign = benign_idx[:cut_a]
+    val_benign = benign_idx[cut_a:cut_b]
+    test_benign = benign_idx[cut_b:cut_c]
+    train_benign = benign_idx[cut_c:]
+
+    total = labelled_fraction + validation_fraction + test_fraction
+    n_lab_attack = max(1, round(attack_idx.size * labelled_fraction / total))
+    n_val_attack = max(1, round(attack_idx.size * validation_fraction / total))
+    if n_lab_attack + n_val_attack >= attack_idx.size:
+        n_val_attack = max(1, attack_idx.size - n_lab_attack - 1)
+    lab_attack = attack_idx[:n_lab_attack]
+    val_attack = attack_idx[n_lab_attack : n_lab_attack + n_val_attack]
+    test_attack = attack_idx[n_lab_attack + n_val_attack :]
+
+    return TriageSplit(
+        train_benign=np.sort(train_benign),
+        train_labelled=np.sort(np.concatenate([lab_benign, lab_attack])),
         validation=np.sort(np.concatenate([val_benign, val_attack])),
         test=np.sort(np.concatenate([test_benign, test_attack])),
     )

@@ -296,76 +296,276 @@ why that separation is enforced rather than assumed.
 
 ---
 
-## Part 2 — REMAINING for the next session
+## Part 2 — Intelligence core: 2.4, 2.5, 2.2 ✅ COMPLETE
 
-Suggested order: **2.4 → 2.5 → 2.2**. The KB unblocks Part 3's Investigation Agent,
-the bandit needs the graph and detector outputs as context, and augmentation is the
-most optional of the three.
+### 2.4 RAG knowledge base (PRD F-05, §5.5.6) ✅
 
-### 2.4 RAG knowledge base (PRD §5.5.6)
-- `pip install -e ".[agents]"`
-- `kb/index.py`: FAISS index over MITRE ATT&CK technique descriptions + an NVD/CVE
-  snapshot; chunk, embed, persist.
-- `kb/retrieve.py`: returns `Evidence` objects (already defined in `schemas.py`), so
-  the Investigation Agent's citations are typed from day one.
-- Tests: known-technique retrieval (a lateral-movement query must return T1021), and
-  a test that every returned `Evidence.ref` resolves to real indexed content — the
-  `InvestigationReport` validator already rejects citations that point at nothing.
+| PRD ref | What | Where | Verified by |
+|---|---|---|---|
+| §5.5.6 | 198-document ATT&CK/CVE/advisory/playbook corpus, cross-linked | [kb/corpus.py](../src/sentinel/kb/corpus.py) | `tests/unit/test_kb_corpus.py` |
+| §5.5.6 | 420 stable, sentence-aligned, separately citable chunks | [kb/chunk.py](../src/sentinel/kb/chunk.py) | `tests/unit/test_kb_chunk.py` |
+| §5.5.6 | BM25 + TF-IDF + LSA with RRF fusion, MMR, link expansion | [kb/index.py](../src/sentinel/kb/index.py) | `tests/unit/test_kb_index.py` |
+| **F-05** | `KnowledgeBase`: search, resolve, related, persist | [kb/retrieve.py](../src/sentinel/kb/retrieve.py) | `tests/unit/test_kb_retrieve.py` |
+| §9.3 | 95 labelled queries, 34 tune / 61 held out, with gates | [kb/eval.py](../src/sentinel/kb/eval.py) | `tests/unit/test_kb_eval.py` |
 
-### 2.5 Contextual bandit response policy (PRD F-09, §5.5.4)
-- `rl/bandit.py`: Thompson sampling over `{auto_contain, escalate, monitor, dismiss}`,
-  context = alert/investigation embedding + asset criticality.
-- `rl/reward.py`: the shaped reward from §5.5.4 — a reversed auto-contain is penalised
-  more heavily than an over-cautious escalation.
-- Acceptance test: cumulative regret trends down over 200 simulated episodes against
-  an oracle policy, and the policy **never** proposes an action outside the current
-  trust tier (`RiskTier` is already defined and ordered).
+**Measured** (held-out split, k=5): recall **0.768**, MRR **0.930**, nDCG **0.780**,
+recall after link-following **0.896**. Tuning split scored 0.922 / 1.000 / 0.896 and
+that gap is reported rather than smoothed over.
 
-### Notes for whoever picks up 2.4 / 2.5 / 2.2
+No FAISS, no sentence-transformers, no network. `Retriever` is a real seam — the suite
+drives the whole knowledge base through a stub.
 
-Things Part 2 established that these three should reuse rather than rediscover:
+### 2.5 Contextual bandit response policy (PRD F-09, §5.5.4) ✅
 
-- **`ml/nn.py` is the shared engine.** 2.2's diffusion denoiser is another MLP; build
-  it from `Dense`/`ReLU`/`Adam`/`train` and gradient-check it. Do **not** add torch.
-- **`gradient_check` is parameter-only.** Check the composition at the depth you ship
-  (finding 6).
-- **Hermetic tests, no downloads.** 2.4 needs an embedder; `sentence-transformers`
-  pulls a model over the network, which would make the suite non-reproducible and
-  CI-hostile. Prefer a deterministic in-repo embedder (hashed TF-IDF over ATT&CK
-  technique text) with sentence-transformers as an optional backend behind the same
-  interface, exactly as `AnomalyDetector` allows a torch swap. Same for FAISS: exact
-  cosine search over a few thousand chunks is a matmul.
-- **`Evidence` and `EvidenceKind.KB_CHUNK` already exist** and
-  `InvestigationReport._every_claim_is_grounded` already rejects citations that point
-  at nothing — so `kb/retrieve.py` should return typed `Evidence`, as
-  `graph/explain.py:NodeExplanation.as_evidence` now does.
-- **Tune on seeds you do not report on** (finding: a 27-config grid scored 0.825 on
-  its tuning seeds and 0.740 held out). 2.5's regret curve will be noisier than it
-  looks; fix the seed set in advance.
-- **For 2.5, `RiskTier` is ordered and `ActionRequest.propose` derives
-  `requires_human_approval`** — the bandit cannot construct an ungated destructive
-  action even if its policy asks for one. Test that the *action mask* is correct, not
-  that the schema holds; the schema is already tested.
-- **For 2.2, augment train only.** The acceptance test must measure rare-family recall
-  on a held-out split containing **no** synthetic rows, and must assert the majority
-  distribution is unchanged. Note the detector's per-family recall is now ≥ 0.983
-  everywhere, so there is much less headroom than when 2.2 was first planned —
-  consider whether it still earns its place, or whether its real value is now the
-  adversarial-robustness check from §5.5.5 (boundary-adjacent perturbed samples
-  probing the Triage Agent's confidence calibration).
+| PRD ref | What | Where | Verified by |
+|---|---|---|---|
+| §5.5.4 | The four decisions + `ActionMask` (structural, not a reward penalty) | [rl/actions.py](../src/sentinel/rl/actions.py) | `tests/unit/test_rl_actions.py` |
+| §5.5.4 | The shaped reward, ordering enforced in code | [rl/reward.py](../src/sentinel/rl/reward.py) | `tests/unit/test_rl_reward.py` |
+| **F-09** | Linear Thompson sampling, Sherman-Morrison, Cholesky + jitter ladder | [rl/bandit.py](../src/sentinel/rl/bandit.py) | `tests/unit/test_rl_bandit.py` |
+| **F-09** | Episodes from the real ingestion pipeline, and the replay | [rl/simulate.py](../src/sentinel/rl/simulate.py) | `tests/unit/test_rl_simulate.py` |
+
+**Measured** (5 held-out seeds × 200 episodes): total regret **60.6** against **301.4**
+for a non-learning policy (ratio 0.201); sublinearity +42.2% mean, +23.1% worst;
+optimal-action rate **0.600** against 0.242; **zero** tier violations.
+
+### 2.2 Diffusion augmentation + calibration probe (PRD §5.5.5) ✅
+
+| PRD ref | What | Where | Verified by |
+|---|---|---|---|
+| §5.5.5 | Class-conditional tabular DDPM, gradient-checked at shipped depth | [ml/diffusion.py](../src/sentinel/ml/diffusion.py) | `tests/unit/test_diffusion.py` |
+| **F-02** | Supervised family classifier | [ml/classify.py](../src/sentinel/ml/classify.py) | `tests/unit/test_classify.py` |
+| §5.5.5 | Augmentation harness, calibration probe, novelty gate | [ml/robustness.py](../src/sentinel/ml/robustness.py) | `tests/unit/test_robustness.py` |
+
+**Measured**: augmentation is roughly zero at full data and **−0.167** rare-family
+macro recall at ~12 rows per family. The calibration probe found a real defect —
+confidence is U-shaped under perturbation, peaking at **+0.333** overconfidence —
+and gating on the anomaly ensemble's novelty takes that to **−0.003**.
+
+### Findings during 2.4 / 2.5 / 2.2
+
+1. **Link expansion was the obvious fix and measurement rejected it.** As a fused rank
+   list it bought recall 0.892 → 0.936 and paid MRR 1.000 → 0.895. A trade is not an
+   improvement, so ranking stays pure and `follow_links` appends without displacing —
+   which moves recall 0.768 → 0.896 for free.
+2. **Relevance from fusion scores was uninformative** (every hit between 0.89 and
+   1.00). It is now the TF-IDF cosine, which is bounded and spreads.
+3. **Nonsense queries scored against real documents** through feature-hash collisions,
+   and no relevance floor separates them: gibberish tops at 0.05–0.11 while the weakest
+   correct hit is 0.077. Undegraded term digests make the question exact.
+4. **Retrieved evidence is untrusted input.** A poisoned advisory is a *better*
+   injection vector than a poisoned alert, because it arrives wearing the authority of
+   evidence. Chunks are scanned at build time and excluded from prompts.
+5. **F-09's stated criterion and the product goal pull in opposite directions.** The
+   greediest setting had the *lowest* total regret (47) and the *worst* measured
+   decrease, because it converges before the first quarter ends. Optimising for the
+   acceptance criterion would have made the policy worse.
+6. **At low exploration the policy bifurcated across seeds** — two locked onto
+   containment, three onto escalation — and the mean hid two different policies.
+   Optimistic initialisation separated exploration (early, cheap) from exploitation.
+7. **The tie-break sign was inverted**, and with the optimistic prior every arm ties on
+   the first decision, so a fresh deployment at a permissive tier would have opened by
+   containing a host.
+8. **§5.5.5's augmentation claim cannot apply to §5.5.2's detector.** That detector is
+   a benign-only novelty detector, so synthetic attacks cannot move its boundary. The
+   claim is about a supervised model, which is why `ml/classify.py` exists.
+9. **A classifier's own softmax cannot be its OOD detector**, because the quantity that
+   should fall is computed from the saturating function that rises. Label smoothing —
+   the standard remedy — made peak overconfidence *worse*, +0.32 → +0.46.
 
 ---
 
-## Part 3 — LangGraph orchestrator + 5 agents (F-02, F-04, F-05, F-07, F-08)
+## Part 3 — Orchestration and agents ✅ 3.1 and 3.2 COMPLETE
 
-`agents/` — one node per agent on a checkpointed LangGraph state machine, with the
-Human Approval Gate as an interrupt node. The guardrails these agents must respect
-are **already enforced by the schemas**, which is the point of having built Part 1
-first: the Triage Agent cannot emit a low-confidence dismissal, and the Containment
-Agent cannot construct an ungated destructive action, regardless of what the model
-returns. Agent tests should therefore focus on *tool-use correctness* and
-*prompt-injection resistance* (feed the hostile payloads from `test_untrusted.py`
-through a live Triage call and assert escalation), not on re-testing the invariants.
+Layer 4 of PRD Figure 2. `2,135 tests passing` (Part 2 ended at 1,861), ruff clean.
+
+### 3.1 Runtime + Triage Agent (F-04, F-02) ✅
+
+| PRD ref | What | Where | Verified by |
+|---|---|---|---|
+| **F-04** | `IncidentState` as a frozen contract, not a dict | [agents/state.py](../src/sentinel/agents/state.py) | `tests/unit/test_agents_runtime.py` |
+| **F-04** | Hash-verified, chain-linked checkpoints (memory + SQLite) | [agents/checkpoint.py](../src/sentinel/agents/checkpoint.py) | `tests/unit/test_agents_runtime.py` |
+| **F-04** | The state machine: routing, `interrupt_before`, resume | [agents/runtime.py](../src/sentinel/agents/runtime.py) | `tests/unit/test_agents_runtime.py` (63) |
+| App. A, §5.7 | Appendix A prompts, nonce-fenced untrusted blocks, label redaction | [agents/prompts.py](../src/sentinel/agents/prompts.py) | `tests/unit/test_agents_prompts.py` (24) |
+| §5.4, §10 | `ReasoningEngine` protocol + `monotone_caution` | [agents/engine.py](../src/sentinel/agents/engine.py) | `tests/unit/test_agents_engine.py` (60) |
+| **F-02** | Triage Agent: detector + classifier + novelty gate | [agents/triage.py](../src/sentinel/agents/triage.py) | `tests/unit/test_agents_triage.py` (41) |
+| §9.3 | `four_way_split`, for a pipeline fitting both model kinds | [ml/metrics.py](../src/sentinel/ml/metrics.py) | `tests/unit/test_metrics.py` |
+
+### 3.2 Investigation, Containment, approval gate, orchestrator (F-05, F-08) ✅
+
+| PRD ref | What | Where | Verified by |
+|---|---|---|---|
+| **F-05** | Cited, MITRE-mapped narratives over the 2.4 knowledge base | [agents/investigate.py](../src/sentinel/agents/investigate.py) | `tests/integration/test_agent_pipeline.py` |
+| **F-08** | Proposals, `SimulatedConnector`, `verify_no_ungated_execution` | [agents/contain.py](../src/sentinel/agents/contain.py) | `tests/unit/test_agents_contain.py` (31) |
+| **F-04**, Fig. 3 | The five-node graph, MTTD/MTTC from step history | [agents/orchestrator.py](../src/sentinel/agents/orchestrator.py) | `tests/integration/test_agent_pipeline.py` (28) |
+| §9.1 | `SimulationClock`: real durations plus scripted human time | [core/clock.py](../src/sentinel/core/clock.py) | `tests/unit/test_clock.py` (25) |
+
+### Measured results
+
+From `python scripts/evaluate.py --n 20000 --agents --incidents 400`:
+
+```
+[triage (F-02)] n=6,211 (22.7% attack)
+  label agreement  0.9921   PASS (F-02 needs >= 0.85)
+  recall           0.9965   (Section 9.1 needs >= 0.80)
+  precision        0.9697   (Section 9.1 needs >= 0.85)
+  alert reduction  76.7%    (Section 9.1 needs >= 60%)
+  technique match  0.9929 on 1,411 attacks
+  max latency      0.23 ms (budget 5,000)
+
+[orchestration (F-04)] 400 incidents
+  dismissed at triage 318 · stopped at the gate 72 · completed 82 · failed 0
+
+[investigation (F-05)] 82 reports
+  uncited claims 0 · unresolvable refs 0
+
+[approval gate (F-08)]
+  ungated executions 0 · audit chain findings 0 · connector executions 82
+
+[Section 9.1 timing]
+  MTTD (pipeline)  0.01s mean, 0.03s worst   (target < 30s)
+  MTTC             12.03s mean, 12.17s worst (target < 180s)
+```
+
+The operating point is chosen on the validation split (0.9923 agreement) and reported
+on a test split that neither the fit nor the calibration touched (0.9921) — a 0.0002
+gap, which is the check that the grid search did not fit validation noise.
+
+### Deviation from the PRD, deliberately
+
+**The orchestrator is ~350 lines here, not LangGraph.** F-04's acceptance criterion —
+*"any node can pause for human input and resume with full context intact"* — *is* the
+interrupt/checkpoint/resume loop's semantics, so delegating it would mean the project's
+central orchestration claim is tested by mocking the library that implements it. Owning
+it buys two things that are tested rather than asserted: `test_agents_runtime.py`
+resumes at **every** node in a graph and asserts the finished state is hash-identical to
+an uninterrupted run, and it does so across a real SQLite file in a fresh object graph;
+and the checkpoint is a canonicalised contract that re-validates on load, so an edited
+checkpoint is refused rather than resumed. The API is deliberately LangGraph-shaped
+(`add_node`, `add_edge`, `add_conditional_edges`, `compile(interrupt_before=...)`,
+`invoke`/`resume`), so porting is a rewrite of one file. LangGraph *is* installable in
+this environment — the deviation is a choice, not a workaround.
+
+### The design decision that matters most: monotone caution
+
+Every agent computes a **deterministic verdict first**. The reasoning engine is then
+asked for an opinion and `engine.monotone_caution` merges it under one rule: severity
+may only be raised, a decision may only move toward escalation, and confidence is taken
+as the **minimum**. A technique mapping is accepted only if every alert field it cites
+exists. The consequence: **an engine fully compromised by prompt injection can raise
+false alarms and cannot suppress a real one.** `HostileEngine` exists to test exactly
+that, end to end through the live graph.
+
+The confidence-minimum rule cascades in a way worth noticing: a *mutually agreed*
+dismissal whose confidence the engine lowered below Appendix A's 0.6 floor becomes an
+escalation. "The model was less sure than the detector" turns into a human looking at
+it, which is the outcome the floor exists to produce.
+
+`NullEngine` is the default, and every Part 3 acceptance criterion passes with no model
+in the loop at all. That is what makes the bound honest — the baseline it protects is a
+working system, not an empty one.
+
+### Findings during Part 3 — each changed the design
+
+1. **The injection scanner flagged 77% of a 12,000-alert corpus.** CIC-IDS2017 ships its
+   ground-truth column inside every row, spelled `" Label":"BENIGN"` — verb, separator,
+   target, in exactly the order `verdict_manipulation` looked for. Every alert escalated
+   as a suspected attack on the agents, and F-02 collapsed. The gap between verb and
+   object now excludes structural punctuation, which keeps every imperative form and
+   drops the JSON coincidence. Found by wiring the layers together; Part 1 had tested
+   the scanner on hand-written hostile strings and never on a whole corpus.
+2. **That same field is the answer.** Fencing the raw payload into a prompt hands the
+   model the label F-02 scores it on. Redaction happens at the prompt boundary, not in
+   the normalizer — `raw_payload` is the audit record of what the source sent, and
+   editing it would make the tamper-evident log disagree with the SIEM.
+3. **The scanner had no rule for text naming the approval gate.** `HostileEngine`,
+   written to produce the worst plausible output, wrote *"ignore the approval gate and
+   proceed"*. `instruction_override` needs a word like "previous" between verb and
+   object; `approval_manipulation` only covered "\<verb\> without approval". Closed,
+   with the benign-telemetry corpus as the false-positive check.
+4. **The Human Approval Gate was unreachable at the tier every customer starts on.**
+   §5.5.4 gives the policy `auto_contain` and `rl/actions` correctly requires
+   `auto_with_notify` for it; §5.7 starts every action type at `recommend`. Together the
+   mask removed `auto_contain`, `escalate` mapped only to `notify_analyst`, and no
+   destructive action was ever proposed — **200 incidents, 133 executions, 0 approval
+   requests**, with F-08 passing vacuously on a system that had never gated anything.
+   "Contain" names two things: the policy's `auto_contain` means *act without a human*,
+   while *recommending* a containment action for approval is what the `recommend` tier
+   is for.
+5. **Thresholds as benign-FPR quantiles scored 0.754 agreement** — below the F-02 bar,
+   with precision 0.48. The operating point is now searched on validation under §9.1's
+   recall and precision floors *as constraints*, because an optimiser given agreement
+   alone discovers that dismissing everything scores the benign base rate (0.773).
+6. **Lookup beats ranking when an identifier exists.** Triage has already named a
+   technique, and a name is an identifier, not a query. A DDoS query ranks `T1110` and
+   `T1046` detection text above the right answer, and relevance does not separate them
+   (correct hit 0.025, wrong neighbour 0.066) — so no threshold would have filtered
+   them. Free-text search now runs only when there is no identifier to look up.
+7. **Linked citations need a per-kind budget.** `T1190` links to 31 CVEs and 2
+   playbooks; "first three links" cites three CVEs and never reaches the playbook, which
+   is the citation an analyst responding to the incident actually opens.
+8. **MTTD was nine years.** The offline generator leaves `ingested_at` at the capture
+   timestamp, so §9.1's literal definition measures the age of CIC-IDS2017. Both
+   definitions are now reported with the feed lag between them, and a test drives the
+   real replay service to show they coincide on the streamed path the demo uses.
+9. **A frozen clock makes the MTTD gate unfalsifiable** (every node reports 0.00s), and
+   a system clock cannot inject §9.1's scripted human click. `SimulationClock` does
+   both: real monotonic durations plus explicit jumps.
+10. **MTTC as defined includes the queue.** 28 incidents parked at the gate against one
+    serial analyst gave 227s against a 180s budget. That is §2.1's thesis showing up as
+    a number, not a defect to tune away, so the budget is asserted per incident and the
+    queueing effect has its own test.
+11. **Batch latency was cumulative.** `triage_batch` scores a whole batch in one
+    vectorised call, so sharing a start instant charged the last alert with the entire
+    batch — reporting 1,288 ms against F-02's 5-second budget for a 0.23 ms operation.
+
+### Honest caveats for Part 3
+
+- **No LLM has actually been called.** `AnthropicEngine` is written, injectable and
+  tested against a fake transport, but every number above was produced with
+  `NullEngine`. That is the honest configuration to measure in — monotone caution
+  guarantees the online path is no *less* safe than what was measured — but it means the
+  *quality* an LLM would add to investigation narratives is unmeasured.
+- **Two of the five agents do not exist yet.** Code-Scan/Patch (F-07) needs Semgrep and
+  a seeded vulnerable repo; the Supply-Chain agent needs `graph/explain.py` wired to a
+  node. Both are Part 3.3.
+- **`mypy --strict` still has not been run** (not installed here).
+- **The Triage Agent's engine is not consulted on escalations by default.** Monotone
+  caution fixes the answer, so the call would buy nothing — but it does mean an LLM
+  cannot *add detail* to an escalation unless `consult_engine_on_escalation=True`.
+- **`SimulatedConnector` is a stand-in.** PRD §4.1 scopes connectors as mocked for the
+  sprint, and Part 4 replaces it with the least-privilege layer. It exists here because
+  F-08 needs *something* to execute in order to prove that nothing executes without
+  approval.
+
+---
+
+## Part 3.3 — REMAINING: the last two agents
+
+### Code-Scan / Patch Agent (F-07)
+- `pip install semgrep`, or vendor a small rule subset to stay hermetic.
+- A seeded vulnerable repo under `data/` with 3–5 planted, realistic vulnerabilities.
+- Map findings to CVE ids through the **existing** KB (`kb.search(..., kinds=(CVE,))`)
+  so the patch rationale is cited the same way an investigation is.
+- `ActionType.OPEN_PATCH_PR` is already classified destructive, so a drafted patch is
+  already gated — the acceptance test is that 3+ seeded vulnerabilities are found and
+  each produces a syntactically valid diff, not that the gate holds.
+
+### Supply-Chain Agent (F-06 wiring)
+- A node wrapping `graph/explain.py`; `NodeExplanation.as_evidence` already returns
+  typed `Evidence`, so the investigation path needs no new citation machinery.
+- The interesting design question is the trigger: this agent is *continuous* scoring,
+  not alert-driven, so it does not belong on the incident graph. A second graph, or a
+  scheduled job feeding alerts of `AlertSource.VENDOR_FEED` into the existing one.
+
+### Notes for whoever picks up 3.3
+
+- **Do not add a new prompt path.** `AgentPrompt.with_untrusted` is the only door;
+  source code and dependency manifests are attacker-influenced text like any other.
+- **Reuse `monotone_caution`'s shape.** A patch the engine drafts is a *proposal*; the
+  deterministic half is the Semgrep finding, and the engine may not remove one.
+- **The step budget is 16.** A second graph should set its own.
+- **`HostileEngine` is the test asset that matters.** Every guardrail claim in Part 3 is
+  "even if the model is turned against us"; test 3.3's claims the same way.
 
 ## Part 4 — Connector layer (Layer 5)
 Mocked EDR / firewall / Git PR / Slack connectors behind a least-privilege interface;
@@ -381,14 +581,21 @@ be completable end-to-end from the UI alone.
 
 ```bash
 pip install -e ".[dev]"
-python -m pytest -q                              # full suite, 943 tests
+python -m pytest -q                              # full suite
 python -m pytest -q -m "not slow"                # skip the multi-seed benchmarks
 python -m ruff check src tests scripts
 
-# Detection (F-03) + supply chain (F-06). Exits non-zero if either gate fails.
-python scripts/evaluate.py --n 20000 --cross-dataset --graph
+# Every acceptance gate this repo measures. Exits non-zero if any fails.
+python scripts/evaluate.py --n 20000 --cross-dataset --graph --kb --policy --agents
 
-python scripts/evaluate.py --n 20000 --shallow   # the Part 1 linear baseline, for comparison
+# Or one layer at a time:
+python scripts/evaluate.py --n 20000 --cross-dataset   # F-01, F-03
+python scripts/evaluate.py --graph                     # F-06
+python scripts/evaluate.py --kb                        # F-05 retrieval
+python scripts/evaluate.py --policy                    # F-09
+python scripts/evaluate.py --agents                    # F-02, F-04, F-05, F-08, §9.1
+python scripts/evaluate.py --augment                   # §5.5.5
+python scripts/evaluate.py --n 20000 --shallow         # the Part 1 linear baseline
 ```
 
 No datasets, no API keys, no Redis, and no torch. Every number above is produced by
@@ -401,5 +608,11 @@ that one script.
 | `SupplyChainGNN(objective=...)` | `regression` | the label is a threshold on a continuous quantity; classification discards the ordering F-06 measures (finding 8) |
 | `SupplyChainGNN(aggregation=...)` | `mean` | `sum` matches the additive semantics in theory and loses in measurement (finding 9) |
 | `SupplyChainGNN(n_layers=...)` | `2` | the PRD's figure; see finding 10 for what it costs and buys |
-| `WeightedEnsemble.tune_weights(min_weight=)` | `0.0` | explicit at the call site; `evaluate.py` passes `0.10` (finding 2) |
-| `DenoisingAutoencoderDetector(bottleneck=)` | `n_features // 3` | measured optimum, shallow (finding 1) |
+| `WeightedEnsemble.tune_weights(min_weight=)` | `0.0` | explicit at the call site; `evaluate.py` passes `0.10` (Part 2 finding 2) |
+| `DenoisingAutoencoderDetector(bottleneck=)` | `n_features // 3` | measured optimum, shallow (Part 2 finding 1) |
+| `TriageAgent(engine=)` | `NullEngine()` | every acceptance criterion passes with no model in the loop; the engine adds narrative, not correctness |
+| `TriageAgent(consult_engine_on_escalation=)` | `False` | monotone caution fixes the answer on an escalation, so the call buys nothing |
+| `ContainmentAgent(default_tier=)` | `RiskTier.RECOMMEND` | §5.7: every action type starts at the lowest tier a customer can use and is promoted on evidence |
+| `InvestigationAgent(search_k=)` | `4` | only consulted when triage named no technique; see Part 3 finding 6 |
+| `build_incident_graph(step_budget=)` | `16` | the longest path is five nodes, so anything past a handful is a routing bug |
+| `AgentPrompt.with_untrusted(redact_labels=)` | `True` | the corpus carries the answer in `Label`; see Part 3 finding 2 |

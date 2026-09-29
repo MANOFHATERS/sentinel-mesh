@@ -691,6 +691,254 @@ def run_augmentation(*, n: int, seed: int) -> dict[str, Any]:
     }
 
 
+def run_agents(*, n: int, seed: int, incidents: int) -> dict[str, Any]:
+    """Evaluate the agent layer (PRD F-02, F-04, F-05, F-08, Section 9.1).
+
+    Runs real alerts through the real graph with the real audit log, so every
+    number here is produced by the same code path the demo uses — Section 9.3's
+    one-pipeline rule applied to Layer 4.
+
+    F-08 is reported from :func:`verify_no_ungated_execution`, which reads the
+    audit chain rather than the :class:`ActionRequest` objects. Those objects
+    enforce the rule, so asking them whether it held would be circular.
+    """
+    import tempfile
+    from datetime import UTC, datetime
+    from pathlib import Path as _Path
+
+    from sentinel.agents.contain import (
+        ContainmentAgent,
+        SimulatedConnector,
+        verify_no_ungated_execution,
+    )
+    from sentinel.agents.investigate import InvestigationAgent
+    from sentinel.agents.orchestrator import (
+        build_incident_graph,
+        incident_timings,
+        new_incident,
+    )
+    from sentinel.agents.state import HumanDecision, IncidentStatus
+    from sentinel.agents.triage import TECHNIQUE_BY_FAMILY, TriageAgent, TriageModel
+    from sentinel.audit.log import HashChainedAuditLog
+    from sentinel.core.clock import SimulationClock
+    from sentinel.core.schemas import TriageDecision
+    from sentinel.kb.retrieve import KnowledgeBase
+    from sentinel.ml.metrics import four_way_split
+
+    print()
+    print("=" * 72)
+    print("Layer 4 - agents and orchestration (F-02, F-04, F-05, F-08)")
+    print("=" * 72)
+
+    alerts = generate_alerts(n, seed=seed)
+    y = labels_of(alerts)
+    split = four_way_split(y, seed=seed)
+    train_benign = [alerts[i] for i in split.train_benign]
+    train_labelled = [alerts[i] for i in split.train_labelled]
+    validation = [alerts[i] for i in split.validation]
+    test = [alerts[i] for i in split.test]
+
+    model = TriageModel.fit(
+        train_benign, train_labelled=train_labelled, validation=validation, seed=seed
+    )
+    calibration = model.calibration
+    assert calibration is not None
+    print(f"  split {split.sizes}")
+    print(f"  calibration (chosen on validation): {calibration.summary()}")
+
+    # --- F-02, on the split neither the fit nor the calibration touched -----
+    results = TriageAgent(model=model).triage_batch(test)
+    truth = y[split.test]
+    kept = np.array(
+        [0 if r.decision is TriageDecision.AUTO_DISMISS else 1 for r in results]
+    )
+    agreement = float((kept == truth).mean())
+    true_positive = int(((kept == 1) & (truth == 1)).sum())
+    false_positive = int(((kept == 1) & (truth == 0)).sum())
+    false_negative = int(((kept == 0) & (truth == 1)).sum())
+    recall = true_positive / max(1, true_positive + false_negative)
+    precision = true_positive / max(1, true_positive + false_positive)
+    dismiss_rate = float((kept == 0).mean())
+
+    technique_hits = technique_total = 0
+    for alert, result in zip(test, results, strict=True):
+        if alert.ground_truth_label == BENIGN:
+            continue
+        technique_total += 1
+        technique_hits += result.technique_id == TECHNIQUE_BY_FAMILY.get(
+            alert.ground_truth_label
+        )
+    technique_agreement = technique_hits / max(1, technique_total)
+
+    f02_pass = agreement >= 0.85
+    print()
+    print(f"[triage (F-02)] n={len(test):,} ({truth.mean():.1%} attack)")
+    print(
+        f"  label agreement  {agreement:.4f}   "
+        f"{'PASS' if f02_pass else 'FAIL'} (F-02 needs >= 0.85)"
+    )
+    print(f"  recall           {recall:.4f}   (Section 9.1 needs >= 0.80)")
+    print(f"  precision        {precision:.4f}   (Section 9.1 needs >= 0.85)")
+    print(f"  alert reduction  {dismiss_rate:.1%}   (Section 9.1 needs >= 60%)")
+    print(f"  technique match  {technique_agreement:.4f} on {technique_total:,} attacks")
+    print(f"  max latency      {max(r.latency_ms for r in results):.2f} ms (budget 5,000)")
+
+    # --- F-04 / F-05 / F-08, through the live graph ------------------------
+    # Real node durations, with the analyst's click injected on top. A frozen
+    # clock would report MTTD as 0.00s and pass its budget without measuring.
+    clock = SimulationClock(datetime(2026, 9, 28, 12, 0, 0, tzinfo=UTC))
+    connector = SimulatedConnector()
+    kb = KnowledgeBase.build()
+    graph = build_incident_graph(
+        triage=TriageAgent(model=model, clock=clock),
+        investigation=InvestigationAgent(kb=kb, clock=clock),
+        containment=ContainmentAgent(clock=clock),
+        connector=connector,
+    )
+    temp_dir = _Path(tempfile.mkdtemp(prefix="sentinel-eval-"))
+    log = HashChainedAuditLog(temp_dir / "audit.sqlite", clock=clock)
+
+    counts = {"dismissed": 0, "completed": 0, "gated": 0, "failed": 0}
+    detect: list[float] = []
+    contain: list[float] = []
+    ungrounded_claims = 0
+    unresolvable_refs = 0
+    reports = 0
+
+    for alert in test[:incidents]:
+        run_result = graph.invoke(
+            new_incident(alert, at=clock.now()), clock=clock, audit=log
+        )
+        state = run_result.state
+        timings = incident_timings(state)
+        if timings.pipeline_detect_seconds is not None:
+            detect.append(timings.pipeline_detect_seconds)
+
+        if state.status is IncidentStatus.DISMISSED:
+            counts["dismissed"] += 1
+        elif state.status is IncidentStatus.FAILED:
+            counts["failed"] += 1
+
+        if run_result.interrupted:
+            counts["gated"] += 1
+            clock.advance(12.0)  # the scripted analyst click from Section 9.1
+            run_result = graph.resume(
+                state.incident_id,
+                HumanDecision(
+                    approver="analyst@acme", approved=True, decided_at=clock.now()
+                ),
+                clock=clock,
+                audit=log,
+            )
+            state = run_result.state
+            timings = incident_timings(state)
+            if timings.contain_seconds is not None:
+                contain.append(timings.contain_seconds)
+        if state.status is IncidentStatus.COMPLETED:
+            counts["completed"] += 1
+
+        if state.report is not None:
+            reports += 1
+            known = {item.ref for item in state.report.evidence}
+            for _statement, refs in state.report.claims:
+                if not refs:
+                    ungrounded_claims += 1
+                elif not set(refs) <= known:
+                    unresolvable_refs += 1
+            kb_refs = [ref for ref in known if ref.startswith("kb://")]
+            if not kb.resolves_all(kb_refs):
+                unresolvable_refs += 1
+
+    ungated = verify_no_ungated_execution(log)
+    chain = log.verify()
+    f08_pass = not ungated and not chain.findings
+    f05_pass = reports > 0 and ungrounded_claims == 0 and unresolvable_refs == 0
+    f04_pass = counts["gated"] > 0 and counts["failed"] == 0
+
+    print()
+    print(f"[orchestration (F-04)] {min(incidents, len(test)):,} incidents")
+    print(f"  dismissed at triage    {counts['dismissed']:,}")
+    print(f"  stopped at the gate    {counts['gated']:,}")
+    print(f"  completed              {counts['completed']:,}")
+    print(f"  failed                 {counts['failed']:,}")
+    print(
+        f"  interrupt/resume       {'PASS' if f04_pass else 'FAIL'} "
+        "(F-04 needs a reachable gate and no failed runs)"
+    )
+    print()
+    print(f"[investigation (F-05)] {reports:,} reports")
+    print(f"  uncited claims         {ungrounded_claims}")
+    print(f"  unresolvable refs      {unresolvable_refs}")
+    print(
+        f"  grounding              {'PASS' if f05_pass else 'FAIL'} "
+        "(F-05 needs every claim to trace to a chunk or log line)"
+    )
+    print()
+    print("[approval gate (F-08)]")
+    print(f"  ungated executions     {len(ungated)}")
+    print(f"  audit chain findings   {len(chain.findings)}")
+    print(f"  connector executions   {len(connector.executed):,}")
+    print(
+        f"  gate                   {'PASS' if f08_pass else 'FAIL'} "
+        "(F-08 needs zero actions executed without a logged approval)"
+    )
+    print()
+    print("[Section 9.1 timing]")
+    if detect:
+        print(
+            f"  MTTD (pipeline)        {float(np.mean(detect)):.2f}s mean, "
+            f"{max(detect):.2f}s worst   (target < 30s)"
+        )
+    if contain:
+        print(
+            f"  MTTC                   {float(np.mean(contain)):.2f}s mean, "
+            f"{max(contain):.2f}s worst   (target < 180s)"
+        )
+    log.close()
+
+    return {
+        "split_sizes": split.sizes,
+        "calibration": {
+            "escalate_fpr": calibration.escalate_fpr,
+            "monitor_fpr": calibration.monitor_fpr,
+            "validation_agreement": calibration.agreement,
+            "grid_points": calibration.n_considered,
+        },
+        "triage": {
+            "n_test": len(test),
+            "agreement": agreement,
+            "recall": recall,
+            "precision": precision,
+            "alert_reduction": dismiss_rate,
+            "technique_agreement": technique_agreement,
+            "max_latency_ms": max(r.latency_ms for r in results),
+        },
+        "orchestration": counts,
+        "investigation": {
+            "reports": reports,
+            "uncited_claims": ungrounded_claims,
+            "unresolvable_refs": unresolvable_refs,
+        },
+        "approval_gate": {
+            "ungated_executions": list(ungated),
+            "audit_findings": len(chain.findings),
+            "connector_executions": len(connector.executed),
+        },
+        "timing": {
+            "mttd_pipeline_mean_s": float(np.mean(detect)) if detect else None,
+            "mttd_pipeline_max_s": max(detect) if detect else None,
+            "mttc_mean_s": float(np.mean(contain)) if contain else None,
+            "mttc_max_s": max(contain) if contain else None,
+        },
+        "f02_agreement_pass": f02_pass,
+        "f04_orchestration_pass": f04_pass,
+        "f05_grounding_pass": f05_pass,
+        "f08_approval_gate_pass": f08_pass,
+        "s91_mttd_pass": bool(detect) and max(detect) < 30.0,
+        "s91_mttc_pass": bool(contain) and max(contain) < 180.0,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Sentinel Mesh offline evaluation")
     parser.add_argument("--n", type=int, default=20000, help="alerts to generate")
@@ -742,6 +990,17 @@ def main() -> int:
         default=200,
         help="episodes per seed for the F-09 replay; the PRD names 200",
     )
+    parser.add_argument(
+        "--agents",
+        action="store_true",
+        help="also evaluate the agent layer end to end (PRD F-02, F-04, F-05, F-08)",
+    )
+    parser.add_argument(
+        "--incidents",
+        type=int,
+        default=200,
+        help="incidents to drive through the orchestration graph for --agents",
+    )
     parser.add_argument("--out", type=Path, default=Path("data/artifacts/evaluation.json"))
     args = parser.parse_args()
 
@@ -762,6 +1021,10 @@ def main() -> int:
         result["response_policy"] = run_policy(n_episodes=args.episodes)
     if args.augment:
         result["augmentation"] = run_augmentation(n=args.n, seed=args.seed)
+    if args.agents:
+        result["agents"] = run_agents(
+            n=args.n, seed=args.seed, incidents=args.incidents
+        )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
@@ -778,6 +1041,19 @@ def main() -> int:
         passed = passed and bool(result["response_policy"]["f09_regret_pass"])
     if args.augment:
         passed = passed and bool(result["augmentation"]["s555_calibration_pass"])
+    if args.agents:
+        agents = result["agents"]
+        passed = passed and all(
+            bool(agents[gate])
+            for gate in (
+                "f02_agreement_pass",
+                "f04_orchestration_pass",
+                "f05_grounding_pass",
+                "f08_approval_gate_pass",
+                "s91_mttd_pass",
+                "s91_mttc_pass",
+            )
+        )
     return 0 if passed else 1
 
 
