@@ -6,6 +6,42 @@ tracks what is actually built and verified, and what the next session picks up.
 **Rule for this ledger:** nothing is marked done unless a test asserts it. A feature
 with code but no test is listed as *partial*.
 
+## Where things stand, and what the next session builds
+
+Parts 1, 2 and 3 are complete. **All five PRD agents exist**, on three checkpointed
+graphs that share one state machine, one Human Approval Gate and one audit chain. Every
+acceptance criterion except **F-10** is met and measured by one command:
+
+```bash
+python scripts/evaluate.py --n 20000 --cross-dataset --graph --kb --policy \
+    --agents --codescan --supplychain
+```
+
+**The next session builds Part 4, the connector layer**, and it is the smaller of the two
+remaining pieces. The interfaces it replaces are deliberately narrow and already have
+their contracts fixed by tests:
+
+| Replace | With | The constraint already in place |
+|---|---|---|
+| `SimulatedConnector.execute(action)` | real EDR / firewall / identity connectors | must refuse an action whose `requires_human_approval` is true and whose status is not `APPROVED` — `test_agents_contain.py` asserts the refusal |
+| `DraftPullRequestConnector.open_draft(action, draft)` | a real git host | must open a **draft**; the capability it must not have is a merge, and the guarantee is that `PullRequestDraft` has no non-draft state to construct |
+
+Start with the git connector: it is the one with a concrete spec (`PullRequestDraft`
+carries the branch, the title, the body and the validated diffs) and the one whose
+failure mode is visible rather than silent. `verify_no_ungated_execution` should keep
+returning empty against all three graphs' logs without modification — if it needs
+changing, the connector has been given authority it should not have.
+
+**Part 5 is the dashboard (F-10)**, and every data source it needs is already a function
+rather than a new query path: `CompiledGraph.pending()`, `approval_queue()`,
+`top_risk_explanations()`, `ScanResult.summary()`, `PullRequestDraft.body` and
+`HashChainedAuditLog.iter_records()`.
+
+Two standing gaps, neither blocking: **no LLM has actually been called** (`AnthropicEngine`
+is written and tested against a fake transport; every number here was produced with
+`NullEngine`), and **`mypy --strict` has not been run** because it is not installed in
+this environment.
+
 ---
 
 ## Part 1 — Foundation ✅ COMPLETE
@@ -539,41 +575,316 @@ working system, not an empty one.
 
 ---
 
-## Part 3.3 — REMAINING: the last two agents
+## Part 3.3 — the last two agents ✅ COMPLETE
 
-### Code-Scan / Patch Agent (F-07)
-- `pip install semgrep`, or vendor a small rule subset to stay hermetic.
-- A seeded vulnerable repo under `data/` with 3–5 planted, realistic vulnerabilities.
-- Map findings to CVE ids through the **existing** KB (`kb.search(..., kinds=(CVE,))`)
-  so the patch rationale is cited the same way an investigation is.
-- `ActionType.OPEN_PATCH_PR` is already classified destructive, so a drafted patch is
-  already gated — the acceptance test is that 3+ seeded vulnerabilities are found and
-  each produces a syntactically valid diff, not that the gate holds.
+All five PRD agents now exist. `2,657 tests passing` (Part 3.2 ended at 2,135), ruff
+clean. The 522 new tests are almost all in the scan layer, because that is where the
+new code that can be *silently* wrong lives: a patch that validates and does the wrong
+thing is invisible without a test that reads the resulting text.
 
-### Supply-Chain Agent (F-06 wiring)
-- A node wrapping `graph/explain.py`; `NodeExplanation.as_evidence` already returns
-  typed `Evidence`, so the investigation path needs no new citation machinery.
-- The interesting design question is the trigger: this agent is *continuous* scoring,
-  not alert-driven, so it does not belong on the incident graph. A second graph, or a
-  scheduled job feeding alerts of `AlertSource.VENDOR_FEED` into the existing one.
+### Code-Scan / Patch Agent (F-07) ✅
 
-### Notes for whoever picks up 3.3
+| PRD ref | What | Where | Verified by |
+|---|---|---|---|
+| §5.6 | Name resolution through import aliases | [scan/symbols.py](../src/sentinel/scan/symbols.py) | `tests/unit/test_scan_symbols.py` (30) |
+| **F-07** | Flow-sensitive may-taint analysis, per-rule sanitizers | [scan/taint.py](../src/sentinel/scan/taint.py) | `tests/unit/test_scan_taint.py` (57) |
+| **F-07** | 14 rules with CWE ids and mechanical fixes | [scan/rules.py](../src/sentinel/scan/rules.py) | `tests/unit/test_scan_rules.py` (117) |
+| **F-07** | Source edits, unified diffs, and a verifying diff *applier* | [scan/patch.py](../src/sentinel/scan/patch.py) | `tests/unit/test_scan_patch.py` (70) |
+| **F-07** | One AST walk, every rule, four-gate patch validation | [scan/analyzer.py](../src/sentinel/scan/analyzer.py) | `tests/unit/test_scan_analyzer.py` (42) |
+| §5.1 | Immutable snapshot with an adversarial walk | [scan/repo.py](../src/sentinel/scan/repo.py) | `tests/unit/test_scan_repo.py` (28) |
+| **F-07** | Self-describing ground truth for the fixture | [scan/seeded.py](../src/sentinel/scan/seeded.py) | `tests/unit/test_scan_seeded.py` (36) |
+| **F-07** | 18 seeded defects + 18 SAFE controls | [data/vulnerable_app/](../data/vulnerable_app/) | `tests/integration/test_codescan_pipeline.py` |
+| **F-07** | The agent: CVE citation, gated draft PR, its own graph | [agents/codescan.py](../src/sentinel/agents/codescan.py) | `tests/unit/test_agents_codescan.py` (47) |
 
-- **Do not add a new prompt path.** `AgentPrompt.with_untrusted` is the only door;
-  source code and dependency manifests are attacker-influenced text like any other.
-- **Reuse `monotone_caution`'s shape.** A patch the engine drafts is a *proposal*; the
-  deterministic half is the Semgrep finding, and the engine may not remove one.
-- **The step budget is 16.** A second graph should set its own.
-- **`HostileEngine` is the test asset that matters.** Every guardrail claim in Part 3 is
-  "even if the model is turned against us"; test 3.3's claims the same way.
+**Measured** (`python scripts/evaluate.py --codescan`):
+
+```
+[static analysis] 14 rules, 4 file(s), 261 lines
+  findings               19
+  seeded detected        18/18   recall 1.000   PASS (F-07 needs >= 3)
+  false positives        0 of 18 SAFE controls   PASS (needs 0)
+  INFO escalated         0 (needs 0)
+  unmarked findings      0
+  validated patches      15   PASS (F-07 needs >= 3, each valid)
+  rejected patches       0 (needs 0)
+  diff replay failures   0 (needs 0)
+  patched-parse failures 0 (needs 0)
+
+[code-scan graph (F-07, F-08)]
+  stopped at the gate    True
+  PRs before approval    0 · draft PRs opened 1
+  ungated executions     0 · audit chain findings 0
+  cited claims           39 · uncited 0 · unresolvable refs 0 · CVE citations 24
+  left for a human       5 finding(s)
+  scan latency           0.16s · time to draft PR 25.25s (incl. a 25s human review)
+```
+
+**Deviation from the PRD, deliberately.** PRD §5.6 names Semgrep; this is a hermetic
+AST analyzer, in the same spirit as `ml/nn.py` standing in for PyTorch and
+`agents/runtime.py` for LangGraph. Three reasons, and the third decides it: the
+repository still installs, tests and evaluates in one command with no network; F-07 is
+graded on the *patch*, and producing a parameterised SQL query from an f-string needs
+the AST positions and the taint result, so the analysis has to be owned anyway; and
+taint is what separates a finding from noise. `StaticAnalyzer` is a Protocol and
+`test_agents_codescan.py` drives the agent through a stub, so a Semgrep backend is a
+drop-in rather than a rewrite.
+
+**The guarantee that matters: the model cannot write code.** Every hunk is an
+AST-positioned splice from `scan/rules.py`; **no field of an engine response is read
+when building a patch**. An engine fully controlled by an attacker can raise a severity
+and add a cited sentence, and cannot place one character into a pull request.
+`test_codescan_pipeline.py` drives `HostileEngine` through the live graph and asserts the
+pushed diff is byte-identical to `NullEngine`'s.
+
+### Supply-Chain Agent (F-06's guardrail) ✅
+
+| PRD ref | What | Where | Verified by |
+|---|---|---|---|
+| **F-06** | `explain_node` wired to an agent, cited as `graph://path/...` | [agents/supplychain.py](../src/sentinel/agents/supplychain.py) | `tests/unit/test_agents_supplychain.py` (39) |
+| §3.4 | Per-node-kind remediation, and the routing that follows | same | `tests/integration/test_supplychain_pipeline.py` (20) |
+| §5.5.3 | `SupplyChainMonitor`: the scheduled trigger | same | same |
+
+**Measured** (`python scripts/evaluate.py --supplychain`):
+
+```
+[supply-chain agent] 500 nodes, 1080 edges
+  flagged                10 (top-10)   by kind {'package': 7, 'organization': 3}
+  explainable            10/10 = 1.000   PASS (F-06 guardrail needs >= 0.80)
+  graph-path citations   27 · cited claims 23 · uncited 0 · unresolvable refs 0
+  technique asserted     ('T1195.001',)
+  attribution conflicts  1 reported, not hidden
+
+[supply-chain graph (F-08)]
+  package route          gated=True, executions=1, executed pre-approval 0
+  vendor route           gated=False, executions=1 (notify_analyst)
+  ungated executions     0 · audit chain findings 0
+  assessment latency     0.17s · time to remediation 45.20s (incl. a 45s review)
+```
+
+**The trigger question, which was the actual design problem.** Supply-chain risk is
+continuous — nothing happened, and a dependency unmaintained for four years was equally
+unmaintained yesterday — so there is no alert to fire on. Three options; the third ships.
+(1) A sixth node on the incident graph would re-score 500 nodes per network flow and
+produce output unrelated to the triggering alert. (2) A standalone job with its own
+storage would need its own approval gate and audit log, so F-08 would hold in two
+implementations and the second would be the untested one. (3) `SupplyChainMonitor` runs
+on a cadence and mints its own `AlertSource.VENDOR_FEED` alert, and
+`build_supply_chain_review_graph` reuses `IncidentState`, the checkpoint chain, the gate
+and the audit log unchanged. Only the node set is new.
+
+### All five agents at once
+
+`tests/integration/test_all_agents.py` drives all three graphs into a **single**
+`HashChainedAuditLog` and then asks `verify_no_ungated_execution` — one function,
+unmodified — whether F-08 held across all of them. The three triggers are deliberately
+different, because that is the reason there are three graphs: an alert arrives, a commit
+is pushed, a schedule fires with nothing having happened.
+
+```
+graph 1 (incident)      60 alerts · gated, investigated, contained
+graph 2 (code scan)     1 commit  · gated, 1 draft PR opened
+graph 3 (supply chain)  1 tick    · gated, 1 remediation executed
+
+ONE audit chain: 110 rows, six actors
+  ungated executions   0   (F-08 needs 0)
+  chain findings       0   (F-11 needs 0)
+  actors               code_scan_agent, containment_agent, investigation_agent,
+                       orchestrator, supply_chain_agent, triage_agent
+```
+
+It also asserts the log leaks nothing: a list of strings that exist verbatim in the
+corpus and in the F-07 fixture — a planted credential, `hashlib.md5`, an injected
+instruction, CIC-IDS2017's `" Label"` column — must appear in **no** audit payload. The
+log is exported to a customer's SIEM, so a path that starts echoing content would turn
+the tamper-evident record into a second delivery channel.
+
+The reason this is one test rather than three is the claim it protects. A new graph
+growing its own approval path would not fail any existing test; it would just mean the
+guarantee has two implementations, and the second would be the untested one.
+
+### Findings during Part 3.3 — each changed the design
+
+Every one of these was found by a test or a measurement, not anticipated.
+
+1. **A file-scoped "does this rule still fire" check rejects every correct patch in a
+   file with two instances of the same bug.** Measured on the fixture: **8 of 16 patches
+   rejected**, all of them correct, each reported as "still fires after the patch". The
+   obvious alternative — "is the finding at line N gone?" — is wrong in the opposite
+   direction, because a fix that inserts an import shifts every line below it and a
+   still-broken line merely moves. Both gates are now **per-rule counts**: one fewer
+   instance means one was fixed, and no rule gaining an instance means nothing new
+   appeared.
+
+2. **The SQL fix emitted `WHERE a = '?'` for a concatenated query.** Quote stripping ran
+   inside each branch of the template builder, and in `"... a = '" + n + "'"` the opening
+   quote is in the left fragment while the closing quote is in the right, so neither
+   sub-result contains `'?'` to act on. The query runs, matches the literal string `?`,
+   returns nothing, and looks fixed. Stripping now happens once, on the assembled
+   template.
+
+3. **And then `LIKE '{term}%'` produced `LIKE '?%'`** — a search for the two-character
+   string `?%`. A placeholder sharing its quoted region with anything else *cannot* be
+   bound by substitution; the real fix moves the wildcard into the value (`term + "%"`),
+   which is a change to the value expression and not something to guess at. The fixer now
+   **declines**, and the finding is reported without a patch. This is the failure mode a
+   patch-generating scanner has — a valid diff that does the wrong thing — and it passed
+   all four validation gates, because the patch was syntactically perfect and removed the
+   finding.
+
+4. **The path-traversal fix produced `os.path.basename(request.args)["file"]`.** The
+   "innermost tainted sub-expression" search descended *through* a subscript, and
+   `request.args` is tainted in its own right. A name, attribute access or subscript is an
+   atomic value expression and must be taken whole; a call is where composition happens,
+   so its arguments are worth descending into. Before that distinction existed the patch
+   called `basename` on a MultiDict.
+
+5. **A dangerous call with a sanitised argument is not the same as one with an unknown
+   argument.** `subprocess.check_output(shlex.quote(host)...)` kept firing at MEDIUM
+   because the value's taint was merely not *live* for the rule. "Sanitised" is positive
+   evidence the developer handled it, and continuing to report it is how a scanner gets
+   uninstalled; "unknown" describes every helper taking a command as a parameter, and
+   there a report is warranted. They are now distinguished, and the first is suppressed.
+
+6. **A mutually exclusive `if`/`else` was keeping pre-branch taint.** After
+   `if h: h = "a"` / `else: h = "b"` the variable is a literal on every path, but the join
+   unioned the branch outcomes *into* the parent state, modelling a third path that does
+   not exist. Found by a unit test written to pin the kill semantics. An `if` with an
+   `else` is exhaustive and replaces the parent; one without is not, and the fall-through
+   is a real path.
+
+7. **`confidence` and `severity` answer different questions, and conflating them hid a
+   one-word fix.** `host="0.0.0.0"` is a *certain* detection of a *low-severity* problem.
+   Grading its confidence LOW put it below the patch threshold, so the fix was never
+   drafted for a finding the analyzer had no doubt about. Confidence is now "how sure am I
+   this is exploitable"; severity is "how much does it matter", and it lives on the rule.
+
+8. **`Path.read_text` silently translated CRLF, so the caveat about it could never
+   fire.** Universal-newline translation happens before `normalise_source` can notice it
+   did, so a CRLF checkout reported as needing no normalisation — and the one thing the
+   pull-request body exists to say (that these diffs assume LF and will not apply
+   cleanly) was unreachable. Now `read_bytes().decode("utf-8")`.
+
+9. **"Which action may execute now" was written out three times, and the third copy was
+   wrong.** At `auto_with_notify` or `autonomous` an action never becomes `APPROVED`,
+   because nobody approves it — it stays `PENDING` with `requires_human_approval` false.
+   The code-scan graph's node looked only for `APPROVED`, so an autonomous-tier scan
+   failed its run with *"the PR node was reached with no approved action"* while the
+   routing that sent it there was correct. Extracted to `contain.executable_action`,
+   beside `verify_no_ungated_execution`, because it is the positive form of the same
+   security predicate. Three copies of such a predicate means the rule holds in three
+   implementations and only one of them had a test.
+
+10. **Three of seventeen fixture markers were on the wrong line, and the fixture was
+    right.** A marker on a multi-line call's *closing* parenthesis is the natural place to
+    put it and does not match what `ast` reports, which is the line the callee is on. The
+    scan reported line 76 while the ground truth claimed 78, and each one scored as both
+    a miss *and* an unexplained extra finding — a 3/17 recall loss that looked like a
+    detector gap. Markers now go on the reported line, after the opening parenthesis.
+
+11. **`SAFE` and `SEEDED` cannot express `os.system("logrotate -f ...")`.** The construct
+    genuinely is `os.system`, so a scanner that says nothing is hiding something; the
+    argument is a literal, so calling it a vulnerability is crying wolf. Forcing it either
+    way meant inflating recall with a finding nobody should act on, or recording a correct
+    low-confidence report as a false positive and tuning it away. A third state, `INFO`,
+    says "may be reported, but only below the actionable threshold" — and it is gated too,
+    so an `INFO` line escalated to actionable fails the build.
+
+12. **`os.path.join` propagated taint by accident.** It reached the string-`.join()`
+    branch of the transfer function, which gave the right answer for the wrong reason.
+    Listed explicitly now — along with `normpath`, `abspath` and `realpath`, which are the
+    trap: `normpath("../../etc/passwd")` resolves the path *textually* and removes
+    nothing, so a reader who assumes it sanitises has the traversal fix exactly backwards.
+
+13. **A test asserting `IN ('{n}', 'x')` should decline was wrong, and the code was
+    right.** Each quoted region is considered on its own; that one *is* exactly a
+    placeholder, so `IN (?, 'x')` is a correct rewrite and the neighbouring literal keeps
+    its quotes. Recorded because it is the one case in this list where the measurement
+    corrected the expectation rather than the code.
+
+14. **A `SimulationClock` rebuilt from a fixed origin cannot resume a run.** The resumed
+    clock read *before* the pause, so `decided_at` preceded the action's `created_at` and
+    `IncidentState` refused to rebuild — before any node ran, before the approval was
+    recorded, before the connector was reachable. That is the invariant working: an
+    approval that predates the request it approves is not an approval. Both the
+    forward-moving path and the refusal now have tests.
+
+15. **A claim *about* the knowledge base was citing the source line.** The Code-Scan
+    Agent asserts "CWE-89 is not theoretical: the knowledge base records CVE-2017-5638 as
+    an exploited instance of this weakness class", and the ref it cited was reconstructed
+    from the CVE's document id. A chunk id is `kb://cve/CVE-2021-44228#description.0`, so
+    a prefix test against `kb://CVE-2021-44228` matches nothing and the code fell through
+    to the finding's own ref. `InvestigationReport`'s validator was satisfied — the ref
+    resolved — while the claim was grounded in something that does not support it, which
+    is the exact failure citations exist to prevent and the one a resolvability check
+    cannot see. The refs are now carried from where they were minted rather than
+    reconstructed, and a test asserts every such claim cites only `CVE_RECORD` evidence.
+
+16. **A deliberately-vulnerable fixture must not contain a *plausibly-real* secret.**
+    The seeded credential was written in a payment provider's live-key shape, which is
+    what makes a fixture feel real — and GitHub push protection rejected the push,
+    correctly, because a scanner cannot distinguish a fabricated key in that shape from a
+    leaked one. Nothing was lost by changing it: `python.hardcoded-credential` fires on
+    the secret-shaped *name* beside a non-placeholder string literal, so the value's shape
+    was never part of what the test measures. The fixture now says so in a comment, so
+    nobody restores the realism and re-breaks the push. Recorded because it is a general
+    rule for this kind of fixture rather than a one-off: the seeded *defect* should be
+    realistic, and the seeded *data* should be obviously synthetic.
+
+### Honest caveats for Part 3.3
+
+- **The `os.system` fix leaves argument injection open.** `shlex.split("tar czf /var/backups/%s.tgz /srv/app" % name)`
+  removes shell interpretation, so `; rm -rf /` becomes inert argv words — but an attacker
+  can still add argv *words*, e.g. flags the program accepts. The patch note says so, and
+  a draft PR is the right place for a partial fix a human is expected to read. A complete
+  fix parameterises the command construction, which is a change to the calling code.
+- **Generated imports are not sorted.** A fix inserts `import shlex` after the last
+  top-level import, which is where a reviewer expects it and is not where isort would put
+  it. Import ordering belongs to the project's formatter, not to a security patch.
+- **The analysis is intraprocedural.** `def run(cmd): os.system(cmd)` is caught at the
+  definition, at MEDIUM, not traced from its callers; a call through a variable
+  (`fn = subprocess.call`) is not resolved at all. Both limits are pinned by tests in
+  `test_scan_symbols.py::TestDocumentedLimits` so they stay known rather than assumed.
+- **One language.** Every rule is `python.*`. The rule id is namespaced for a reason, but
+  a mid-market monorepo has JavaScript in it.
+- **The fixture is 261 lines.** Recall of 1.000 on 18 seeded defects with 0 false
+  positives on 18 controls is a real measurement of *these rules against these shapes*;
+  it is not a false-positive rate on a real codebase, and the number that matters for
+  adoption is the latter. The fixture is written to include the correct construction
+  beside each defect specifically so the second number is not silently assumed to be zero.
+- **The Supply-Chain Agent drafts no manifest edit**, because the sprint graph is
+  synthetic and a version pin would be invented rather than derived. Stated in the
+  action's own rationale, not only here.
+- **One action per assessment reaches the gate.** Ten flagged nodes would mean ten
+  approval prompts from one scheduled job, and an analyst facing ten near-identical
+  prompts approves them as a batch without reading any. The report carries all ten; a
+  dashboard would split them. That is a product judgement, and it means nine remediations
+  wait for the next tick.
+- **Still no LLM call.** `AnthropicEngine` is written, injectable and tested against a
+  fake transport; every number in this document was produced with `NullEngine`. For the
+  Code-Scan Agent that matters *less* than elsewhere, because the patches are
+  deterministic either way — what is unmeasured is the quality of the narrative.
+- **`mypy --strict` still has not been run** (not installed in this environment).
 
 ## Part 4 — Connector layer (Layer 5)
-Mocked EDR / firewall / Git PR / Slack connectors behind a least-privilege interface;
-Semgrep integration for F-07.
+Real EDR / firewall / Git / Slack connectors behind a least-privilege interface,
+replacing `SimulatedConnector` and `DraftPullRequestConnector`. The Git connector is the
+one with a concrete spec already: it takes a `PullRequestDraft` and must open it as a
+draft, so the capability it must *not* have is a merge.
+
+Optionally a Semgrep-backed `StaticAnalyzer`, which the Protocol already admits. Worth
+doing for the rule breadth and the additional languages; not worth doing for F-07, which
+is met, and the hermetic analyzer should stay as the default so the one-command
+evaluation keeps working.
 
 ## Part 5 — Analyst Copilot dashboard (F-10, Layer 6)
+
 Next.js + d3-force. Consumes the bus and the audit log; the three demo scenarios must
-be completable end-to-end from the UI alone.
+be completable end-to-end from the UI alone. The data sources it needs already exist and
+are worth naming, because each is a function rather than a new query path:
+`CompiledGraph.pending()` for the approval queue (across all three graphs),
+`approval_queue()` for its ordering, `top_risk_explanations()` for the supply-chain map,
+`ScanResult.summary()` and `PullRequestDraft.body` for the code-scan view, and
+`HashChainedAuditLog.iter_records()` for the timeline.
 
 ---
 
@@ -586,14 +897,17 @@ python -m pytest -q -m "not slow"                # skip the multi-seed benchmark
 python -m ruff check src tests scripts
 
 # Every acceptance gate this repo measures. Exits non-zero if any fails.
-python scripts/evaluate.py --n 20000 --cross-dataset --graph --kb --policy --agents
+python scripts/evaluate.py --n 20000 --cross-dataset --graph --kb --policy \
+    --agents --codescan --supplychain
 
 # Or one layer at a time:
 python scripts/evaluate.py --n 20000 --cross-dataset   # F-01, F-03
-python scripts/evaluate.py --graph                     # F-06
+python scripts/evaluate.py --graph                     # F-06 (the model's metric)
 python scripts/evaluate.py --kb                        # F-05 retrieval
 python scripts/evaluate.py --policy                    # F-09
 python scripts/evaluate.py --agents                    # F-02, F-04, F-05, F-08, §9.1
+python scripts/evaluate.py --codescan                  # F-07, and F-08 on graph 2
+python scripts/evaluate.py --supplychain               # F-06's guardrail, F-08 on graph 3
 python scripts/evaluate.py --augment                   # §5.5.5
 python scripts/evaluate.py --n 20000 --shallow         # the Part 1 linear baseline
 ```
@@ -616,3 +930,10 @@ that one script.
 | `InvestigationAgent(search_k=)` | `4` | only consulted when triage named no technique; see Part 3 finding 6 |
 | `build_incident_graph(step_budget=)` | `16` | the longest path is five nodes, so anything past a handful is a routing bug |
 | `AgentPrompt.with_untrusted(redact_labels=)` | `True` | the corpus carries the answer in `Label`; see Part 3 finding 2 |
+| `AstAnalyzer(min_patch_confidence=)` | `MEDIUM` | a code change proposed on a guess teaches reviewers to approve without reading |
+| `CodeScanAgent(min_patch_severity=)` | `MEDIUM` | a draft PR full of informational notes is a draft PR nobody opens |
+| `CodeScanAgent(cve_k=)` | `2` | the citation shows the bug class is exploited in the wild; a third example crowds the report without adding to that |
+| `build_code_scan_graph(step_budget=)` | `8` | the longest path is three nodes; the incident graph's 16 is needlessly loose here |
+| `SupplyChainAgent(top_k=)` | `10` | matches F-06's own metric, and a review queue longer than a screen is one nobody finishes |
+| `SupplyChainAgent(max_hops=)` | `4` | §5.5.3's headline is a *fourth-order* dependency; the 2-layer GNN cannot see that far (Part 2 finding 10) but the graph walk can |
+| `build_supply_chain_review_graph(step_budget=)` | `8` | as above: three nodes |

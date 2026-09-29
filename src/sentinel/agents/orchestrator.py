@@ -47,7 +47,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from sentinel.agents.contain import ContainmentAgent, SimulatedConnector
+from sentinel.agents.contain import (
+    ContainmentAgent,
+    SimulatedConnector,
+    executable_action,
+    pending_action,
+)
 from sentinel.agents.investigate import InvestigationAgent
 from sentinel.agents.runtime import CompiledGraph, GraphSpec, RunContext
 from sentinel.agents.state import END, IncidentState, IncidentStatus, StepOutcome
@@ -360,22 +365,11 @@ def _audit_head(ctx: RunContext) -> str | None:
 
 
 def _latest_pending(state: IncidentState) -> ActionRequest | None:
-    for action in reversed(state.actions):
-        if action.approval_status is ApprovalStatus.PENDING:
-            return action
-    return None
+    return pending_action(state.actions)
 
 
 def _executable(state: IncidentState) -> ActionRequest | None:
-    for action in reversed(state.actions):
-        if action.approval_status is ApprovalStatus.APPROVED:
-            return action
-        if (
-            action.approval_status is ApprovalStatus.PENDING
-            and not action.requires_human_approval
-        ):
-            return action
-    return None
+    return executable_action(state.actions)
 
 
 # --------------------------------------------------------------------------- #

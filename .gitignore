@@ -15,3 +15,6 @@ data/artifacts/*
 *.db
 .coverage
 htmlcov/
+
+# Part 3.3: the evaluation writes its scan artifacts here
+data/artifacts/evaluation.json

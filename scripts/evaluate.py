@@ -939,6 +939,492 @@ def run_agents(*, n: int, seed: int, incidents: int) -> dict[str, Any]:
     }
 
 
+def run_codescan(*, seed: int) -> dict[str, Any]:
+    """Evaluate the Code-Scan / Patch Agent (PRD F-07).
+
+    F-07: *"Run Semgrep, map findings to CVEs, draft a patch PR. At least 3 seeded
+    vulnerabilities detected and a syntactically valid patch PR opened for each."*
+
+    Measured against ``data/vulnerable_app``, whose ground truth is marker comments in
+    the source itself rather than a manifest that drifts away from it. Recall is
+    reported beside the **false-positive count on the SAFE controls**, and the gate
+    fails on either: a scanner that finds every seeded defect and also flags the
+    correct version next to it has a recall of 1.0 and no value, because the first
+    thing a team does with a tool that cries wolf is switch it off.
+
+    The whole thing runs through the real code-scan graph with the real audit log, so
+    F-08 is re-verified on a second graph rather than assumed to carry over.
+    """
+    import tempfile
+    from datetime import UTC, datetime
+    from pathlib import Path as _Path
+
+    from sentinel.agents.codescan import (
+        CodeScanAgent,
+        DraftPullRequestConnector,
+        build_code_scan_graph,
+        code_scan_timings,
+        new_code_scan_incident,
+        synthesize_scan_alert,
+    )
+    from sentinel.agents.contain import verify_no_ungated_execution
+    from sentinel.agents.state import HumanDecision, IncidentStatus
+    from sentinel.audit.log import HashChainedAuditLog
+    from sentinel.core.clock import SimulationClock
+    from sentinel.core.schemas import EvidenceKind
+    from sentinel.kb.retrieve import KnowledgeBase
+    from sentinel.scan.analyzer import AstAnalyzer
+    from sentinel.scan.patch import apply_unified_diff
+    from sentinel.scan.repo import RepoSnapshot
+    from sentinel.scan.rules import RULES, rule_ids
+    from sentinel.scan.seeded import FIXTURE_DIR, load_seed_manifest, score_scan
+
+    del seed  # the scan is deterministic; nothing here is sampled
+
+    print()
+    print("=" * 72)
+    print("Code-Scan / Patch Agent (F-07)")
+    print("=" * 72)
+
+    snapshot = RepoSnapshot.from_dir(FIXTURE_DIR)
+    manifest = load_seed_manifest(snapshot)
+    manifest.validate(frozenset(rule_ids()))
+    analyzer = AstAnalyzer()
+    scan = analyzer.scan(snapshot)
+    score = score_scan(manifest, scan.findings)
+
+    # Every patch is re-verified here rather than trusted from the scan: the diff is
+    # the artifact that would reach a pull request, so the check that matters is that
+    # it applies and that the result parses.
+    import ast as _ast
+
+    diff_failures = 0
+    parse_failures = 0
+    for patch in scan.valid_patches:
+        try:
+            if apply_unified_diff(patch.before, patch.diff) != patch.after:
+                diff_failures += 1
+        except Exception:
+            diff_failures += 1
+        try:
+            _ast.parse(patch.after)
+        except SyntaxError:
+            parse_failures += 1
+
+    f07_detection_pass = len(score.detected) >= 3 and not score.missed
+    f07_patch_pass = (
+        len(scan.valid_patches) >= 3
+        and not scan.rejected_patches
+        and diff_failures == 0
+        and parse_failures == 0
+    )
+    noise_pass = not score.false_positives and not score.over_escalated
+
+    print()
+    print(
+        f"[static analysis] {len(RULES)} rules, {scan.files_scanned} file(s), "
+        f"{scan.lines_scanned:,} lines"
+    )
+    print(f"  findings               {len(scan.findings)}")
+    print(
+        f"  seeded detected        {len(score.detected)}/{score.n_seeded}   "
+        f"recall {score.recall:.3f}   "
+        f"{'PASS' if f07_detection_pass else 'FAIL'} (F-07 needs >= 3)"
+    )
+    print(
+        f"  false positives        {len(score.false_positives)} of "
+        f"{len(manifest.controls)} SAFE controls   "
+        f"{'PASS' if noise_pass else 'FAIL'} (needs 0)"
+    )
+    print(f"  INFO escalated         {len(score.over_escalated)} (needs 0)")
+    print(f"  unmarked findings      {len(score.unmarked)}")
+    print(
+        f"  validated patches      {len(scan.valid_patches)}   "
+        f"{'PASS' if f07_patch_pass else 'FAIL'} (F-07 needs >= 3, each valid)"
+    )
+    print(f"  rejected patches       {len(scan.rejected_patches)} (needs 0)")
+    print(f"  diff replay failures   {diff_failures} (needs 0)")
+    print(f"  patched-parse failures {parse_failures} (needs 0)")
+    if score.missed or score.false_positives or score.over_escalated:
+        print(score.describe())
+    by_rule: dict[str, int] = {}
+    for finding in scan.findings:
+        by_rule[finding.rule_id] = by_rule.get(finding.rule_id, 0) + 1
+    print("  findings by rule:")
+    for rule_id, count in sorted(by_rule.items()):
+        patched = sum(1 for p in scan.valid_patches if p.rule_id == rule_id)
+        print(f"    {rule_id:<44} {count} found, {patched} patched")
+
+    # --- through the live graph, with the gate and the audit chain -------------
+    clock = SimulationClock(datetime(2026, 9, 29, 9, 0, 0, tzinfo=UTC))
+    kb = KnowledgeBase.build()
+    connector = DraftPullRequestConnector()
+    graph = build_code_scan_graph(
+        agent=CodeScanAgent(kb=kb, clock=clock),
+        snapshot=snapshot,
+        connector=connector,
+    )
+    temp_dir = _Path(tempfile.mkdtemp(prefix="sentinel-codescan-"))
+    log = HashChainedAuditLog(temp_dir / "audit.sqlite", clock=clock)
+
+    alert = synthesize_scan_alert(
+        snapshot,
+        tenant_id="acme",
+        repository="acme/vulnerable-app",
+        at=clock.now(),
+        commit="HEAD",
+    )
+    run = graph.invoke(new_code_scan_incident(alert, at=clock.now()), clock=clock, audit=log)
+    gated = run.interrupted
+    opened_before_approval = len(connector.opened)
+    if gated:
+        clock.advance(25.0)  # the scripted developer review
+        run = graph.resume(
+            run.state.incident_id,
+            HumanDecision(approver="dev@acme", approved=True, decided_at=clock.now()),
+            clock=clock,
+            audit=log,
+        )
+    state = run.state
+    report = state.report
+    ungated = verify_no_ungated_execution(log)
+    chain = log.verify()
+
+    uncited = 0
+    unresolvable = 0
+    cve_citations = 0
+    if report is not None:
+        known = {item.ref for item in report.evidence}
+        for _statement, refs in report.claims:
+            if not refs:
+                uncited += 1
+            elif not set(refs) <= known:
+                unresolvable += 1
+        cve_citations = sum(
+            1 for item in report.evidence if item.kind is EvidenceKind.CVE_RECORD
+        )
+        kb_refs = [ref for ref in known if ref.startswith("kb://")]
+        if kb_refs and not kb.resolves_all(kb_refs):
+            unresolvable += 1
+
+    grounded_pass = report is not None and uncited == 0 and unresolvable == 0
+    gate_pass = (
+        gated
+        and opened_before_approval == 0
+        and len(connector.opened) == 1
+        and not ungated
+        and not chain.findings
+    )
+    scan_seconds, to_pr = code_scan_timings(state)
+
+    print()
+    print("[code-scan graph (F-07, F-08)]")
+    print(f"  run status             {state.status.value}")
+    print(f"  stopped at the gate    {gated}")
+    print(f"  PRs before approval    {opened_before_approval} (needs 0)")
+    print(f"  draft PRs opened       {len(connector.opened)}")
+    print(f"  ungated executions     {len(ungated)}")
+    print(f"  audit chain findings   {len(chain.findings)}")
+    print(
+        f"  gate                   {'PASS' if gate_pass else 'FAIL'} "
+        "(F-08 on a second graph)"
+    )
+    print(f"  cited claims           {0 if report is None else len(report.claims)}")
+    print(f"  uncited claims         {uncited}")
+    print(f"  unresolvable refs      {unresolvable}")
+    print(f"  CVE citations          {cve_citations}")
+    print(
+        f"  grounding              {'PASS' if grounded_pass else 'FAIL'} "
+        "(every claim traces to a finding, a CVE or a log line)"
+    )
+    if state.status is not IncidentStatus.COMPLETED:
+        print(f"  error                  {state.error}")
+    if connector.opened:
+        _action, draft = connector.opened[0]
+        print(f"  branch                 {draft.branch}")
+        print(f"  files touched          {', '.join(draft.files_touched)}")
+        print(f"  left for a human       {len(draft.unpatched_refs)} finding(s)")
+    if scan_seconds is not None:
+        print(f"  scan latency           {scan_seconds:.2f}s")
+    if to_pr is not None:
+        print(f"  time to draft PR       {to_pr:.2f}s (includes a 25s human review)")
+    log.close()
+
+    return {
+        "rules": len(RULES),
+        "files_scanned": scan.files_scanned,
+        "lines_scanned": scan.lines_scanned,
+        "findings": len(scan.findings),
+        "findings_by_rule": by_rule,
+        "seeded": score.n_seeded,
+        "detected": len(score.detected),
+        "recall": score.recall,
+        "missed": [item.describe() for item in score.missed],
+        "safe_controls": len(manifest.controls),
+        "false_positives": [item.describe() for item in score.false_positives],
+        "over_escalated": [item.describe() for item in score.over_escalated],
+        "unmarked_findings": len(score.unmarked),
+        "validated_patches": len(scan.valid_patches),
+        "rejected_patches": [
+            {"rule_id": p.rule_id, "reason": p.rejection} for p in scan.rejected_patches
+        ],
+        "diff_replay_failures": diff_failures,
+        "patched_parse_failures": parse_failures,
+        "graph": {
+            "status": state.status.value,
+            "gated": gated,
+            "prs_before_approval": opened_before_approval,
+            "prs_opened": len(connector.opened),
+            "ungated_executions": list(ungated),
+            "audit_findings": len(chain.findings),
+            "claims": 0 if report is None else len(report.claims),
+            "uncited_claims": uncited,
+            "unresolvable_refs": unresolvable,
+            "cve_citations": cve_citations,
+            "scan_seconds": scan_seconds,
+            "seconds_to_draft_pr": to_pr,
+        },
+        "f07_detection_pass": f07_detection_pass,
+        "f07_patch_pass": f07_patch_pass,
+        "f07_noise_pass": noise_pass,
+        "f07_grounding_pass": grounded_pass,
+        "f08_second_graph_pass": gate_pass,
+    }
+
+
+def run_supplychain_agent(*, seed: int, top_k: int) -> dict[str, Any]:
+    """Evaluate the Supply-Chain Agent — F-06's *guardrail* (PRD Sections 3.4, 5.4).
+
+    F-06's metric (top-10 precision) is measured by ``--graph``, which is the model's
+    number. This measures the guardrail: *"flags are explainable via the specific graph
+    path that drove the score."* So the figure that gates here is the share of flagged
+    nodes carrying a concrete exposure path or an intrinsic reason, and the run goes
+    through the real review graph so the approval gate and the audit chain are exercised
+    a third time.
+
+    Both routes are driven. A flagged package proposes ``OPEN_PATCH_PR``, which is
+    destructive and therefore gated; a flagged vendor proposes ``NOTIFY_ANALYST``, which
+    is not. Reporting only the gated path would leave half the routing unmeasured.
+    """
+    import tempfile
+    from datetime import UTC, datetime
+    from pathlib import Path as _Path
+
+    import numpy as _np
+
+    from sentinel.agents.contain import SimulatedConnector, verify_no_ungated_execution
+    from sentinel.agents.state import HumanDecision
+    from sentinel.agents.supplychain import (
+        DEPENDENCY_TECHNIQUE,
+        SupplyChainAgent,
+        SupplyChainMonitor,
+        build_supply_chain_review_graph,
+        supply_chain_timings,
+    )
+    from sentinel.audit.log import HashChainedAuditLog
+    from sentinel.core.clock import SimulationClock
+    from sentinel.core.schemas import EvidenceKind
+    from sentinel.graph.gnn import GraphSplit, SupplyChainGNN
+    from sentinel.graph.schema import NodeKind
+    from sentinel.graph.synthetic import SyntheticGraphGenerator
+    from sentinel.kb.retrieve import KnowledgeBase
+
+    print()
+    print("=" * 72)
+    print("Supply-Chain Agent (F-06 guardrail)")
+    print("=" * 72)
+
+    graph, truth = SyntheticGraphGenerator(seed=seed).generate()
+    node_ids = graph.node_ids()
+    labels = truth.labels(node_ids)
+    split = GraphSplit.stratified(labels, seed=seed)
+    model = SupplyChainGNN(random_state=seed).fit(
+        graph, labels, split, exposure=truth.risk_vector(node_ids)
+    )
+    scores = model.risk_scores(graph)
+
+    clock = SimulationClock(datetime(2026, 9, 29, 3, 0, 0, tzinfo=UTC))
+    kb = KnowledgeBase.build()
+    agent = SupplyChainAgent(kb=kb, clock=clock, top_k=top_k)
+    connector = SimulatedConnector()
+    compiled = build_supply_chain_review_graph(
+        agent=agent, graph=graph, model=model, scores=scores, connector=connector
+    )
+    temp_dir = _Path(tempfile.mkdtemp(prefix="sentinel-supplychain-"))
+    log = HashChainedAuditLog(temp_dir / "audit.sqlite", clock=clock)
+    monitor = SupplyChainMonitor(
+        agent=agent, graph=graph, model=model, scores=scores, clock=clock
+    )
+
+    run = monitor.tick(
+        tenant_id="acme", compiled=compiled, audit=log, assessment_id="2026-09-29"
+    )
+    gated = run.interrupted
+    executed_before_approval = len(connector.executed)
+    if gated:
+        clock.advance(45.0)  # the scripted vCISO review
+        run = compiled.resume(
+            run.state.incident_id,
+            HumanDecision(approver="vciso@acme", approved=True, decided_at=clock.now()),
+            clock=clock,
+            audit=log,
+        )
+    state = run.state
+    report = state.report
+    assert report is not None
+
+    assessment = agent.assess(graph, alert=state.alert, model=model, scores=scores)
+    explainable = len(assessment.explainable)
+    flagged = len(assessment.findings)
+    explainability = explainable / flagged if flagged else 0.0
+
+    uncited = 0
+    unresolvable = 0
+    known = {item.ref for item in report.evidence}
+    for _statement, refs in report.claims:
+        if not refs:
+            uncited += 1
+        elif not set(refs) <= known:
+            unresolvable += 1
+    kb_refs = [ref for ref in known if ref.startswith("kb://")]
+    if kb_refs and not kb.resolves_all(kb_refs):
+        unresolvable += 1
+    path_citations = sum(
+        1 for item in report.evidence if item.kind is EvidenceKind.GRAPH_PATH
+    )
+
+    # The ungated route: force vendors and organisations to the top so the
+    # NOTIFY_ANALYST branch is measured rather than assumed.
+    forced = _np.array(
+        [0.99 if node.kind is not NodeKind.PACKAGE else 0.01 for node in graph.nodes],
+        dtype=float,
+    )
+    notify_connector = SimulatedConnector()
+    notify_clock = SimulationClock(datetime(2026, 9, 29, 4, 0, 0, tzinfo=UTC))
+    notify_graph = build_supply_chain_review_graph(
+        agent=SupplyChainAgent(kb=kb, clock=notify_clock, top_k=top_k),
+        graph=graph,
+        scores=forced,
+        connector=notify_connector,
+    )
+    from sentinel.agents.supplychain import new_vendor_risk_incident, synthesize_vendor_alert
+
+    notify_alert = synthesize_vendor_alert(
+        tenant_id="acme", graph=graph, at=notify_clock.now(), assessment_id="vendor-route"
+    )
+    notify_run = notify_graph.invoke(
+        new_vendor_risk_incident(notify_alert, at=notify_clock.now()),
+        clock=notify_clock,
+        audit=log,
+    )
+
+    ungated = verify_no_ungated_execution(log)
+    chain = log.verify()
+    assessed_s, acted_s = supply_chain_timings(state)
+
+    explainability_pass = explainability >= 0.80
+    grounding_pass = uncited == 0 and unresolvable == 0 and path_citations > 0
+    gate_pass = (
+        gated
+        and executed_before_approval == 0
+        and len(connector.executed) == 1
+        and not ungated
+        and not chain.findings
+    )
+    route_pass = (
+        not notify_run.interrupted
+        and len(notify_connector.executed) == 1
+        and notify_connector.executed[0].action_type.value == "notify_analyst"
+    )
+
+    by_kind = {kind.value: count for kind, count in assessment.by_kind.items()}
+    print()
+    print(f"[supply-chain agent] {graph.n_nodes} nodes, {len(graph.edges)} edges")
+    print(f"  flagged                {flagged} (top-{top_k})")
+    print(f"  by kind                {by_kind}")
+    print(
+        f"  explainable            {explainable}/{flagged} = {explainability:.3f}   "
+        f"{'PASS' if explainability_pass else 'FAIL'} (F-06 guardrail needs >= 0.80)"
+    )
+    print(f"  graph-path citations   {path_citations}")
+    print(f"  cited claims           {len(report.claims)}")
+    print(f"  uncited claims         {uncited}")
+    print(f"  unresolvable refs      {unresolvable}")
+    print(
+        f"  grounding              {'PASS' if grounding_pass else 'FAIL'} "
+        "(every claim cites a path, a CVE or a technique)"
+    )
+    print(f"  technique asserted     {report.techniques}")
+    print(f"  attribution conflicts  {len(assessment.disagreements)} reported, not hidden")
+    print()
+    print("[supply-chain graph (F-08)]")
+    print(f"  package route          gated={gated}, executions={len(connector.executed)}")
+    print(f"  executed pre-approval  {executed_before_approval} (needs 0)")
+    print(
+        f"  vendor route           gated={notify_run.interrupted}, "
+        f"executions={len(notify_connector.executed)} "
+        f"({'notify_analyst' if route_pass else 'unexpected'})"
+    )
+    print(
+        f"  routing                {'PASS' if route_pass else 'FAIL'} "
+        "(a notification is not destructive, so it is not gated)"
+    )
+    print(f"  ungated executions     {len(ungated)}")
+    print(f"  audit chain findings   {len(chain.findings)}")
+    print(
+        f"  gate                   {'PASS' if gate_pass else 'FAIL'} "
+        "(F-08 on a third graph)"
+    )
+    if assessed_s is not None:
+        print(f"  assessment latency     {assessed_s:.2f}s")
+    if acted_s is not None:
+        print(f"  time to remediation    {acted_s:.2f}s (includes a 45s human review)")
+    print("  top flagged nodes:")
+    for finding in assessment.findings[:5]:
+        print(f"    {finding.describe().splitlines()[0]}")
+        for path in finding.explanation.paths[:1]:
+            print(f"      {path.describe()}")
+    log.close()
+
+    return {
+        "n_nodes": graph.n_nodes,
+        "n_edges": len(graph.edges),
+        "flagged": flagged,
+        "by_kind": by_kind,
+        "explainable": explainable,
+        "explainability": explainability,
+        "graph_path_citations": path_citations,
+        "claims": len(report.claims),
+        "uncited_claims": uncited,
+        "unresolvable_refs": unresolvable,
+        "techniques": list(report.techniques),
+        "dependency_technique": DEPENDENCY_TECHNIQUE,
+        "attribution_disagreements": list(assessment.disagreements),
+        "package_route": {
+            "gated": gated,
+            "executed_before_approval": executed_before_approval,
+            "executions": len(connector.executed),
+        },
+        "vendor_route": {
+            "gated": notify_run.interrupted,
+            "executions": len(notify_connector.executed),
+            "action": (
+                notify_connector.executed[0].action_type.value
+                if notify_connector.executed
+                else None
+            ),
+        },
+        "ungated_executions": list(ungated),
+        "audit_findings": len(chain.findings),
+        "assessment_seconds": assessed_s,
+        "seconds_to_remediation": acted_s,
+        "f06_explainability_pass": explainability_pass,
+        "f06_grounding_pass": grounding_pass,
+        "f08_third_graph_pass": gate_pass,
+        "routing_pass": route_pass,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Sentinel Mesh offline evaluation")
     parser.add_argument("--n", type=int, default=20000, help="alerts to generate")
@@ -1001,6 +1487,16 @@ def main() -> int:
         default=200,
         help="incidents to drive through the orchestration graph for --agents",
     )
+    parser.add_argument(
+        "--codescan",
+        action="store_true",
+        help="run the Code-Scan / Patch Agent against data/vulnerable_app (F-07)",
+    )
+    parser.add_argument(
+        "--supplychain",
+        action="store_true",
+        help="run the Supply-Chain Agent over the risk graph (F-06's guardrail)",
+    )
     parser.add_argument("--out", type=Path, default=Path("data/artifacts/evaluation.json"))
     args = parser.parse_args()
 
@@ -1024,6 +1520,12 @@ def main() -> int:
     if args.agents:
         result["agents"] = run_agents(
             n=args.n, seed=args.seed, incidents=args.incidents
+        )
+    if args.codescan:
+        result["code_scan"] = run_codescan(seed=args.seed)
+    if args.supplychain:
+        result["supply_chain_agent"] = run_supplychain_agent(
+            seed=args.seed, top_k=args.top_k
         )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -1052,6 +1554,29 @@ def main() -> int:
                 "f08_approval_gate_pass",
                 "s91_mttd_pass",
                 "s91_mttc_pass",
+            )
+        )
+    if args.codescan:
+        code_scan = result["code_scan"]
+        passed = passed and all(
+            bool(code_scan[gate])
+            for gate in (
+                "f07_detection_pass",
+                "f07_patch_pass",
+                "f07_noise_pass",
+                "f07_grounding_pass",
+                "f08_second_graph_pass",
+            )
+        )
+    if args.supplychain:
+        supply_chain = result["supply_chain_agent"]
+        passed = passed and all(
+            bool(supply_chain[gate])
+            for gate in (
+                "f06_explainability_pass",
+                "f06_grounding_pass",
+                "f08_third_graph_pass",
+                "routing_pass",
             )
         )
     return 0 if passed else 1

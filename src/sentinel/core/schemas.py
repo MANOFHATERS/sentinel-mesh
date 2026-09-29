@@ -305,6 +305,13 @@ class AuditEventType(StrEnum):
     INJECTION_DETECTED = "injection_detected"
     GUARDRAIL_BLOCKED = "guardrail_blocked"
     TRUST_TIER_CHANGED = "trust_tier_changed"
+    #: Part 3.3. A code scan finished; the payload carries counts and rule ids, never
+    #: source text — the same rule the injection events follow, and for the same
+    #: reason: this log is exported to a customer's SIEM.
+    CODE_SCAN_COMPLETED = "code_scan_completed"
+    #: Part 3.3. A supply-chain assessment scored a graph. Continuous rather than
+    #: alert-driven, which is why it has its own event and its own graph.
+    SUPPLY_CHAIN_ASSESSED = "supply_chain_assessed"
 
 
 # --------------------------------------------------------------------------- #

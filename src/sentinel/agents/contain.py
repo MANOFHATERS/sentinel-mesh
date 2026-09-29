@@ -76,6 +76,9 @@ __all__ = [
     "ExecutionOutcome",
     "Proposal",
     "SimulatedConnector",
+    "approval_queue",
+    "executable_action",
+    "pending_action",
     "verify_no_ungated_execution",
 ]
 
@@ -413,6 +416,53 @@ def verify_no_ungated_execution(
             if approval_seq is None or approval_seq > record.seq:
                 ungated.append(record.subject_id)
     return tuple(ungated)
+
+
+def pending_action(actions: Sequence[ActionRequest]) -> ActionRequest | None:
+    """The newest action still awaiting a decision, or ``None``.
+
+    Newest first because a run proposes at most one action per pass, so the last
+    pending one is the one the current routing decision is about.
+    """
+    for action in reversed(actions):
+        if action.approval_status is ApprovalStatus.PENDING:
+            return action
+    return None
+
+
+def executable_action(actions: Sequence[ActionRequest]) -> ActionRequest | None:
+    """The newest action that may be executed now, or ``None``.
+
+    Two cases qualify, and missing the second one is a real bug rather than a
+    conservative omission:
+
+    1.  An action a human **approved**.
+    2.  An action still ``PENDING`` whose ``requires_human_approval`` is false —
+        which is what an ``auto_with_notify`` or ``autonomous`` trust tier produces.
+        Such an action never becomes ``APPROVED``, because nobody approves it.
+
+    This lives here, beside :func:`verify_no_ungated_execution`, because it is the
+    positive form of the same predicate and there must be exactly one of it. It was
+    previously written out longhand in each graph, and the third copy — the
+    code-scan graph's — omitted case 2, so an autonomous-tier scan failed its run
+    with *"the PR node was reached with no approved action"* while the routing that
+    sent it there was correct. Three copies of a security predicate means the rule
+    holds in three implementations, and only one of them had a test.
+
+    Note what this does **not** do: it never relaxes
+    :meth:`~sentinel.core.schemas.ActionRequest.mark_executed`, which still refuses
+    to execute a human-gated action that has not been approved. This function
+    chooses a candidate; the schema decides whether it may run.
+    """
+    for action in reversed(actions):
+        if action.approval_status is ApprovalStatus.APPROVED:
+            return action
+        if (
+            action.approval_status is ApprovalStatus.PENDING
+            and not action.requires_human_approval
+        ):
+            return action
+    return None
 
 
 def approval_queue(actions: Sequence[ActionRequest]) -> tuple[ActionRequest, ...]:

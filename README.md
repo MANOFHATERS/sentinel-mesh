@@ -3,17 +3,18 @@
 An autonomous, agentic security operations platform for the mid-market and the MSSPs
 that protect it. Implementation of [`Sentinel_Mesh_PRD.docx`](Sentinel_Mesh_PRD.docx).
 
-**Status: Parts 1, 2 and 3 (3.1–3.2) complete** — the foundation (ingestion,
-contracts, tamper-evident audit, anomaly detection), the intelligence core (deep
-detector, supply-chain GNN, RAG knowledge base, bandit response policy, diffusion
-augmentation), and the agent layer: a checkpointed orchestration graph with a Human
-Approval Gate, plus the Triage, Investigation and Containment agents. The Code-Scan
-and Supply-Chain agents, the connector layer and the dashboard are next. See
-[docs/BUILD_PLAN.md](docs/BUILD_PLAN.md) for exactly what is done, what is measured,
-every finding that changed the design, and where the next session picks up.
+**Status: Parts 1, 2 and 3 complete** — the foundation (ingestion, contracts,
+tamper-evident audit, anomaly detection), the intelligence core (deep detector,
+supply-chain GNN, RAG knowledge base, bandit response policy, diffusion augmentation),
+and the full agent layer: **all five PRD agents** — Triage, Investigation, Containment,
+Code-Scan/Patch and Supply-Chain — across three checkpointed graphs sharing one state
+machine, one Human Approval Gate and one audit chain. The connector layer (Part 4) and
+the dashboard (Part 5) are next. See [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md) for exactly
+what is done, what is measured, every finding that changed the design, and where the next
+session picks up.
 
 ```
-2,135 tests passing · 0 failing · ruff clean
+2,657 tests passing · 0 failing · ruff clean
 ```
 
 ## What works today
@@ -21,12 +22,14 @@ every finding that changed the design, and where the next session picks up.
 ```bash
 pip install -e ".[dev]"
 python -m pytest -q
-python scripts/evaluate.py --n 20000 --cross-dataset --graph --kb --policy --agents
+python scripts/evaluate.py --n 20000 --cross-dataset --graph --kb --policy \
+    --agents --codescan --supplychain
 ```
 
 No datasets, no API keys, **no LLM call**, no Redis, and **no torch** — the evaluation
 generates flows shaped like CIC-IDS2017 (defects included) and runs them through the
-real pipeline, including the real orchestration graph and the real audit log.
+real pipeline, including all three real orchestration graphs, the real static
+analyzer over a real seeded repository, and the real audit log.
 
 ```
 [deep (IF + denoising autoencoder)]
@@ -68,7 +71,36 @@ real pipeline, including the real orchestration graph and the real audit log.
 
 [investigation (F-05)] 82 reports — uncited claims 0, unresolvable refs 0
 [approval gate (F-08)] ungated executions 0, audit chain findings 0
-[Section 9.1] MTTD 0.03s worst (< 30s) · MTTC 12.17s worst (< 180s)
+[Section 9.1] MTTD 0.04s worst (< 30s) · MTTC 12.17s worst (< 180s)
+
+[code-scan (F-07)] 14 rules, 4 files, 261 lines
+  seeded detected        18/18   recall 1.000   PASS (F-07 needs >= 3)
+  false positives        0 of 18 SAFE controls   PASS (needs 0)
+  validated patches      15      PASS (each parses, replays through its own diff,
+                                 removes its finding, and adds none)
+  rejected patches       0
+  gate                   stopped for approval; 0 PRs opened before it
+  report                 39 cited claims, 0 uncited, 24 CVE citations
+  findings by rule:
+    python.sql-injection            2 found, 1 patched
+    python.os-command-injection     1 found, 1 patched
+    python.os-system-injection      3 found, 2 patched
+    python.hardcoded-credential     2 found, 2 patched
+    python.path-traversal           2 found, 1 patched
+    python.code-injection-eval      1 found, 1 patched
+    python.pickle-deserialization   1 found, 0 patched  <- no safe loader exists
+    ... 7 more rules, all patched
+
+[supply-chain agent (F-06 guardrail)] 500 nodes, 1080 edges
+  flagged                10  (7 packages, 3 organizations)
+  explainable            10/10 = 1.000   PASS (needs >= 0.80)
+  graph-path citations   27 · cited claims 23 · uncited 0
+  package route          gated (open_patch_pr is destructive)
+  vendor route           not gated (notify_analyst has no side effect)
+  attribution conflicts  1, reported rather than hidden
+  #4 org-19 (organization) risk=0.9522 driver=supply_chain (own 5% / chain 95%)
+     pkg-0129 (17 CVEs, 1541 days stale) reaches org-19 in 2 hop(s)
+     via pkg-0129 -> vendor-014 -> org-19; contribution 0.490
 ```
 
 ## PRD acceptance criteria met
@@ -80,16 +112,19 @@ real pipeline, including the real orchestration graph and the real audit log.
 | **F-03** | Anomaly detector ROC-AUC ≥ 0.90 on held-out split | **0.9971** |
 | **F-04** | Any node can pause for human input and resume with full context | Resume asserted at **every** node, across a real SQLite file in a fresh process image, hash-identical to an uninterrupted run |
 | **F-05** | Every factual claim traces to a KB chunk or raw log line | 0 uncited claims, 0 unresolvable refs over 82 reports |
-| **F-06** | Supply-chain top-10 precision ≥ 0.80 | **0.8000** (mean over 10 fixed seeds) |
-| **F-08** | Zero actions executed without a logged approval | **0** ungated executions, read back from the audit chain |
+| **F-06** | Supply-chain top-10 precision ≥ 0.80 | **0.8000** (mean over 10 fixed seeds); guardrail: **10/10** flagged nodes explained by a concrete graph path |
+| **F-07** | ≥ 3 seeded vulnerabilities found, a syntactically valid patch PR for each | **18/18** seeded found (recall **1.000**), **0** false positives on 18 SAFE controls, **15** validated patches, **0** rejected |
+| **F-08** | Zero actions executed without a logged approval | **0** ungated executions on **all three** graphs, read back from the audit chain |
 | **F-09** | Simulated regret decreases over a 200-episode replay | regret **60.6** vs **301.4** for a non-learning policy |
 | **F-11** | Chain verification detects any tampering in < 1s | 50,000 rows verified sub-second; every tampering class detected |
 | **F-12** | Report generated by the same pipeline as the demo | One `scripts/evaluate.py`, no separate reporting path |
 | §9.1 | ≥ 60% fewer alerts reaching a human | **88.9%** at a realistic 1% attack base rate; **76.7%** measured directly at triage |
-| §9.1 | MTTD < 30s, MTTC < 3 min | **0.03s** / **12.17s** worst case, real node durations |
+| §9.1 | MTTD < 30s, MTTC < 3 min | **0.04s** / **12.17s** worst case, real node durations |
+
+Only **F-10** (the dashboard) is unclaimed, and it is Part 5.
 
 Part 1's honest weak spot — `botnet` recall 0.608 — is closed: **1.000**, with no
-family regressing. Four caveats stated plainly rather than buried:
+family regressing. Five caveats stated plainly rather than buried:
 
 - **F-06 sits right on its bar.** 0.8000 against a 0.80 target, per-seed 0.60–0.90.
   Met, not comfortably met; rank correlation (0.65) is the stabler figure.
@@ -102,12 +137,21 @@ family regressing. Four caveats stated plainly rather than buried:
   against a fake transport, but every number above was produced with `NullEngine`. That
   is the honest configuration to measure in — see *monotone caution* below — but it
   means the *quality* a model would add to an investigation narrative is unmeasured.
-- **Two of the five agents do not exist yet.** Code-Scan/Patch (F-07) and Supply-Chain
-  are Part 3.3; F-07 and F-10 are therefore not claimed.
+- **F-07's numbers are a measurement of these rules against these shapes**, on a
+  261-line fixture. Recall 1.000 with zero false positives on 18 controls is real and
+  falsifiable — the controls are the *correct* construction for each rule, sitting beside
+  the defective one — but it is not a false-positive rate on a production codebase, and
+  that is the number that decides adoption.
+- **The Supply-Chain Agent drafts no dependency-manifest edit.** PRD §5.5.3 scopes the
+  sprint graph as synthetic, so `package-0129` is not a real project and a version pin
+  would be invented. The Code-Scan Agent's patches are real because they rewrite real
+  syntax; a manifest patch becomes real with Phase 2's CycloneDX ingestion. The action's
+  own rationale says so, not just this README.
 
 ## Architecture
 
-Six layers, per PRD Figure 2. Layers 1–4 and 6's audit trail are built.
+Six layers, per PRD Figure 2. Layers 1–4 and 6's audit trail are built, and all five
+PRD agents exist.
 
 ```
 Layer 1  Sources        sentinel.ingest.replay        dataset replay as a live feed   ✅
@@ -123,13 +167,14 @@ Layer 3  Intelligence   sentinel.ml.featurestore      one feature definition    
                         sentinel.ml.robustness        calibration probe, novelty gate ✅
                         sentinel.kb                   RAG over ATT&CK/CVE             ✅
                         sentinel.rl                   contextual bandit policy        ✅
+                        sentinel.scan                 hermetic static analysis + fixes ✅
 Layer 4  Orchestration  sentinel.agents.runtime       checkpointed state machine      ✅
                         sentinel.agents.triage        Triage Agent (F-02)             ✅
                         sentinel.agents.investigate   Investigation Agent (F-05)      ✅
                         sentinel.agents.contain       Containment + approval gate     ✅
+                        sentinel.agents.codescan      Code-Scan / Patch (F-07)        ✅
+                        sentinel.agents.supplychain   Supply-Chain Agent (F-06)       ✅
                         sentinel.agents.engine        LLM seam + monotone caution     ✅
-                        sentinel.agents.codescan      Code-Scan / Patch (F-07)        Part 3.3
-                        sentinel.agents.supply        Supply-Chain agent              Part 3.3
 Layer 5  Action         sentinel.connectors           EDR/firewall/git/slack          Part 4
 Layer 6  Oversight      sentinel.audit                hash-chained audit log          ✅
                         web/                          Analyst Copilot dashboard       Part 5
@@ -152,6 +197,91 @@ dismisses everything at confidence 1.0, fabricates citations, and writes an inst
 aimed at whoever reads next) is a test asset that drives this end to end. The
 confidence-minimum rule also cascades: a *mutually agreed* dismissal whose confidence
 the engine lowered below Appendix A's 0.6 floor becomes an escalation.
+
+**The model cannot write code, and that is arithmetic rather than policy.** Monotone
+caution bounds what a compromised engine can do to a *verdict*. For the Code-Scan Agent
+the output is a *diff*, so the bound is stricter: **no field of an engine response is read
+when building a patch.** Every hunk is an AST-positioned splice generated from the rule
+that fired. An engine fully controlled by an attacker — through a poisoned advisory, a
+hostile code comment, a crafted commit — can raise a severity and add a cited sentence,
+and cannot place one character into a pull request. `HostileEngine` drives this through
+the live graph and the pushed diff comes out byte-identical to `NullEngine`'s. That
+inverts how LLM-drafted patches usually work, and it is what makes shipping the result as
+a draft PR defensible: the language model is a *narrator*.
+
+**"A syntactically valid patch" is four checks, and the second one is the one that
+matters.** `ast.parse` on the result clears F-07's literal wording, and clearing it
+literally produces exactly the tool developers already ignore. So a patch is accepted only
+once the patched source parses, **replaying the diff against the original reproduces the
+patched text**, one instance of the rule is gone, and no rule gained an instance. Check
+two is not redundant: the diff is the artifact that reaches the pull request, and a diff
+generated from one string while a different string was validated is a patch that passes
+review and breaks the build. It runs through an independent unified-diff applier that
+verifies every context and removal line — independent because if it shared an
+implementation with the edit machinery, agreement between them would prove nothing.
+
+**Two correct-looking patches that were silently wrong, both caught by the fourth gate's
+absence rather than its presence.** A concatenated query `"... a = '" + n + "'"` became
+`"... a = '?'"` — the opening quote lives in the left fragment and the closing quote in
+the right, so the quote-stripping ran in each and matched in neither. The query runs,
+matches the literal string `?`, returns nothing, and looks fixed. Then `LIKE '{term}%'`
+became `LIKE '?%'`, a search for the two-character string `?%`; that one *cannot* be fixed
+by substitution, because the real remedy moves the wildcard into the bound value, so the
+fixer now **declines** and reports the finding without a patch. Both passed all four
+validation gates — syntactically perfect, finding removed — which is the failure mode a
+patch-generating scanner has, and the reason the per-rule tests assert the resulting
+*text* rather than the existence of a diff.
+
+**Sanitizers have to be per-rule, and one boolean cannot express it.**
+`os.path.basename(user_input)` genuinely fixes a path traversal and does nothing at all
+for a command injection — `basename` returns `"a; rm -rf /"` unchanged. A single
+"sanitised" flag must therefore be wrong in one direction or the other: treat it as clean
+and the command injection is missed; treat it as tainted and every correctly fixed path
+handler keeps reporting, which is how a scanner gets uninstalled. So a taint fact records
+*which rules* a value has been cleared for. The same distinction separates "sanitised"
+from "unknown": watching `shlex.quote` run on a value is positive evidence the developer
+handled it and suppresses the finding, while a helper's parameter whose source is in a
+caller the analysis does not follow is reported at MEDIUM.
+
+**The F-07 fixture's ground truth lives in the fixture, and the SAFE half is the half
+that matters.** `data/vulnerable_app` marks each planted defect with a comment on its own
+line rather than in a manifest whose line numbers go stale the moment anyone edits the
+file — a drift no test can catch, because both halves stay correct in isolation. Recall
+alone is satisfiable by a scanner that flags every line, so each seeded defect sits beside
+the **correct construction for the same rule**, and flagging one of those fails the build
+as hard as missing a defect. There is a third state, `INFO`, because two cannot express
+`os.system("logrotate -f /etc/logrotate.conf")`: the construct really is `os.system`, so
+silence hides something, and the argument is a literal, so calling it a vulnerability is
+crying wolf. And nothing in the analyzer reads a marker — a test strips every one and
+asserts the finding set is identical, because otherwise a rule could come to key on the
+comment and the fixture would be grading the scanner on reading its own answer key.
+
+**Supply-chain risk is continuous, so it schedules itself rather than waiting for an
+alert.** Nothing happened; a dependency unmaintained for four years was equally
+unmaintained yesterday. Bolting a sixth node onto the incident graph would re-score 500
+nodes per network flow and produce output unrelated to the triggering alert; a standalone
+job with its own storage would need its own approval gate and audit log, so F-08 would
+hold in two implementations and the second would be the untested one. Instead a scheduled
+monitor mints its own `VENDOR_FEED` alert — deterministic per `(tenant, assessment)`, so
+re-running a nightly tick *resumes* rather than forking — and a second graph reuses the
+state machine, the checkpoint chain, the gate and the log unchanged. Three graphs, one
+implementation of every guarantee.
+
+**What the Supply-Chain Agent proposes depends on what it found, and the routing
+follows.** A package can be upgraded, pinned or dropped, so the action is
+`OPEN_PATCH_PR` — destructive, therefore gated. A vendor cannot be patched at any phase,
+so the action is `NOTIFY_ANALYST`, which has no side effect on a monitored system and is
+therefore **not** gated: asking a human to approve telling a human is a gate that teaches
+people to click through. Both paths run in the same graph and both are measured.
+
+**"Which action may execute now" was written three times and the third copy was wrong.**
+At a trust tier permitting unattended execution an action never becomes `APPROVED`,
+because nobody approves it — it stays `PENDING` with `requires_human_approval` false. The
+code-scan graph's node looked only for `APPROVED`, so an autonomous-tier scan failed its
+run while the routing that sent it there was correct. It now lives once, beside
+`verify_no_ungated_execution`, because it is the positive form of the same security
+predicate. Three copies of such a predicate means the rule holds in three implementations
+and only one of them had a test.
 
 **The novelty gate, promoted from diagnostic to safety mechanism.** Part 2.2 measured
 that a classifier's softmax *rises* on far-out-of-distribution input — most confident
@@ -305,16 +435,22 @@ src/sentinel/
   graph/        supply-chain graph, synthetic generator, GraphSAGE, path explainer
   kb/           corpus, chunking, BM25/TF-IDF/LSA retrieval, citation resolution
   rl/           response actions, trust-tier mask, shaped reward, Thompson bandit
+  scan/         import resolution, taint analysis, 14 rules + mechanical fixes,
+                unified diffs and a verifying applier, fixture ground truth
   agents/       state, checkpoints, runtime, prompts, engine, triage,
-                investigate, contain, orchestrator
+                investigate, contain, codescan, supplychain, orchestrator
+data/
+  vulnerable_app/  the F-07 fixture: 18 seeded defects, 18 SAFE controls,
+                   with its ground truth as marker comments in the source
 tests/
   unit/         the module-level suites
   integration/  PRD acceptance criteria end to end
 scripts/
   evaluate.py   the single evaluation pipeline (F-12) — every gate, one command
 docs/
-  BUILD_PLAN.md what is built, what is measured, what is next
-  DATA.md       dataset downloads and every quirk the normalizers handle
+  BUILD_PLAN.md  what is built, what is measured, every finding, what is next
+  ARCHITECTURE.md the decisions, and why the obvious alternative is wrong
+  DATA.md        dataset downloads and every quirk the normalizers handle
 ```
 
 ## Optional extras
