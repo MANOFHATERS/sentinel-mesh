@@ -561,9 +561,11 @@ working system, not an empty one.
   `NullEngine`. That is the honest configuration to measure in — monotone caution
   guarantees the online path is no *less* safe than what was measured — but it means the
   *quality* an LLM would add to investigation narratives is unmeasured.
-- **Two of the five agents do not exist yet.** Code-Scan/Patch (F-07) needs Semgrep and
-  a seeded vulnerable repo; the Supply-Chain agent needs `graph/explain.py` wired to a
-  node. Both are Part 3.3.
+- ~~**Two of the five agents do not exist yet.**~~ Closed by Part 3.3 below. The
+  prediction in this line was half right: the Supply-Chain agent did just need
+  `graph/explain.py` wired to a node, and the Code-Scan agent did *not* need Semgrep —
+  owning the analysis turned out to be a prerequisite for generating the patch, which is
+  what F-07 is actually graded on.
 - **`mypy --strict` still has not been run** (not installed here).
 - **The Triage Agent's engine is not consulted on escalations by default.** Monotone
   caution fixes the answer, so the call would buy nothing — but it does mean an LLM
