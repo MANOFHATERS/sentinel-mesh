@@ -288,6 +288,97 @@ def run_graph(*, seed: int, top_k: int) -> dict[str, Any]:
     return result
 
 
+def run_kb(*, k: int) -> dict[str, Any]:
+    """Measure the retrieval knowledge base (PRD F-05, Section 5.5.6).
+
+    Every component retriever is reported alongside the fusion, on the held-out query
+    split. The components are printed because the fusion's margin over the best of
+    them is smaller than one query out of 61, and a report showing only the
+    configuration that shipped would imply a confidence the measurement does not
+    support. Both splits are printed for the same reason: the gap between them is the
+    most useful number here.
+    """
+    from sentinel.kb import KnowledgeBase, evaluate_retrieval, load_eval_queries
+    from sentinel.kb.eval import GATE_MRR, GATE_RECALL_AT_5, GATE_RECALL_WITH_LINKS
+    from sentinel.kb.index import LexicalIndex, LsaIndex
+
+    print()
+    print("=" * 72)
+    print("F-05 / Section 5.5.6 - retrieval knowledge base")
+    print("=" * 72)
+
+    kb = KnowledgeBase.build()
+    stats = kb.stats()
+    print(
+        f"  corpus: {stats['documents']} documents -> {stats['chunks']} chunks "
+        f"{stats['chunks_by_kind']}"
+    )
+    density = float(stats["density"])  # type: ignore[arg-type]
+    print(
+        f"  index:  {stats['features']} features, {stats['nonzeros']} non-zeros, "
+        f"density {density:.4f}"
+    )
+    if stats["suspicious_chunks"]:
+        print(
+            f"  note:   {stats['suspicious_chunks']} chunk(s) matched injection "
+            "heuristics and are reported for audit"
+        )
+
+    tune = load_eval_queries(split="tune")
+    test = load_eval_queries(split="test")
+    bm25 = LexicalIndex(encoder=kb.lexical.encoder, scorer="bm25")
+    components = {
+        "bm25": bm25,
+        "tfidf": LexicalIndex(encoder=kb.lexical.encoder, scorer="tfidf"),
+        "lsa": LsaIndex.build(bm25),
+    }
+
+    print()
+    print(f"  held-out split, {len(test)} queries, k={k}:")
+    per_component: dict[str, Any] = {}
+    for name, retriever in components.items():
+        report = evaluate_retrieval(kb.with_retriever(retriever), test, k=k)
+        per_component[name] = report.as_dict()
+        print(f"    {report.summary()}")
+    fused = evaluate_retrieval(kb, test, k=k)
+    print(f"    {fused.summary()}")
+    by_kind = {name: round(value, 3) for name, value in fused.per_kind_recall.items()}
+    print(f"  per-kind recall: {by_kind}")
+
+    tuned = evaluate_retrieval(kb, tune, k=k)
+    print()
+    print(f"  tuning split, {len(tune)} queries, shown for the generalisation gap:")
+    print(f"    {tuned.summary()}")
+
+    checks = {
+        f"recall@{k}": (fused.recall_at_k, GATE_RECALL_AT_5),
+        "mrr": (fused.mrr, GATE_MRR),
+        f"recall@{k}+links": (fused.recall_with_links, GATE_RECALL_WITH_LINKS),
+    }
+    print()
+    passed = True
+    for label, (value, gate) in checks.items():
+        ok = value >= gate
+        passed = passed and ok
+        verdict = "PASS" if ok else "FAIL"
+        print(f"  {verdict}  {label:<18} {value:.3f}   gate {gate:.2f}")
+    if fused.misses:
+        print()
+        print("  queries with no correct document in the top k:")
+        for miss in fused.misses:
+            print(f"    - {miss}")
+
+    return {
+        "documents": stats["documents"],
+        "chunks": stats["chunks"],
+        "suspicious_chunks": stats["suspicious_chunks"],
+        "test": fused.as_dict(),
+        "tune": tuned.as_dict(),
+        "components": per_component,
+        "f05_retrieval_pass": passed,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Sentinel Mesh offline evaluation")
     parser.add_argument("--n", type=int, default=20000, help="alerts to generate")
@@ -314,6 +405,14 @@ def main() -> int:
         help="also evaluate the supply-chain risk graph (PRD F-06)",
     )
     parser.add_argument("--top-k", type=int, default=10, help="k for F-06 top-k precision")
+    parser.add_argument(
+        "--kb",
+        action="store_true",
+        help="also evaluate the retrieval knowledge base (PRD F-05)",
+    )
+    parser.add_argument(
+        "--kb-k", type=int, default=5, help="cut-off for the F-05 retrieval metrics"
+    )
     parser.add_argument("--out", type=Path, default=Path("data/artifacts/evaluation.json"))
     args = parser.parse_args()
 
@@ -328,6 +427,8 @@ def main() -> int:
     )
     if args.graph:
         result["supply_chain"] = run_graph(seed=args.seed, top_k=args.top_k)
+    if args.kb:
+        result["knowledge_base"] = run_kb(k=args.kb_k)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
@@ -338,6 +439,8 @@ def main() -> int:
     passed = bool(result["f03_auc_pass"])
     if args.graph:
         passed = passed and bool(result["supply_chain"]["f06_top_k_pass"])
+    if args.kb:
+        passed = passed and bool(result["knowledge_base"]["f05_retrieval_pass"])
     return 0 if passed else 1
 
 

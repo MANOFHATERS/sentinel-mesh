@@ -1,0 +1,95 @@
+{"query":"host moved laterally to a file server using SMB admin shares","gold":["T1021.002","T1021"],"split":"tune","note":"the build plan's named example: a lateral-movement query must return T1021"}
+{"query":"attacker dumped credentials from LSASS memory on a workstation","gold":["T1003.001","T1003"],"split":"tune","note":"exact technique vocabulary present in corpus"}
+{"query":"many failed logins for one password across hundreds of accounts","gold":["T1110.003","T1110"],"split":"tune","note":"describes spraying without using the word spraying"}
+{"query":"log4j jndi lookup exploited through a user agent header","gold":["CVE-2021-44228"],"split":"tune","note":"cve by product and mechanism"}
+{"query":"shadow copies deleted right before files were encrypted","gold":["T1490","T1486","PB-RANSOMWARE-PRE"],"split":"tune","note":"pre-encryption sequence should pull the playbook too"}
+{"query":"npm dependency replaced by a typosquatted package during the build","gold":["T1195.001","GHSA-TORCHTRITON-2022"],"split":"tune","note":"dependency confusion phrased as typosquatting"}
+{"query":"regular outbound https connections every sixty seconds from a non browser process","gold":["T1071.001","T1071","PB-C2-BEACON"],"split":"tune","note":"beaconing described only by its timing signature"}
+{"query":"web shell dropped in the web root of an exchange server","gold":["T1505.003","CVE-2021-26855","PB-WEBSHELL"],"split":"tune","note":"technique plus the campaign's cve"}
+{"query":"powershell launched with an encoded command by winword","gold":["T1059.001","T1027"],"split":"tune","note":"process ancestry phrasing"}
+{"query":"scheduled task created remotely after an inbound authentication","gold":["T1053.005","T1053"],"split":"tune","note":"sub-technique should outrank the parent"}
+{"query":"vpn appliance leaked session tokens so mfa was bypassed","gold":["CVE-2023-4966","T1550"],"split":"tune","note":"token theft bypassing a second factor"}
+{"query":"how do I contain a host after credential theft and spread","gold":["PB-LATERAL-SMB"],"split":"tune","note":"procedural question, should hit a playbook not a technique"}
+{"query":"dns queries with long random subdomains to one parent domain","gold":["T1071.004"],"split":"tune","note":"tunnelling by query shape"}
+{"query":"service account requested service tickets for many spns","gold":["T1558.003"],"split":"tune","note":"kerberoasting without the name"}
+{"query":"user approved a push notification after dozens of prompts","gold":["T1621"],"split":"tune","note":"mfa fatigue described behaviourally"}
+{"query":"xz utils backdoor in the release tarball affecting ssh","gold":["CVE-2024-3094","GHSA-XZ-SOCIAL-2024","T1195.002"],"split":"tune","note":"two linked corpus entries for one incident"}
+{"query":"internal port scan from a workstation to many hosts and ports","gold":["T1046","PB-SCAN-TRIAGE"],"split":"tune","note":"discovery burst"}
+{"query":"large zip archive built in a temp directory before upload","gold":["T1560","T1074"],"split":"tune","note":"staging plus archiving"}
+{"query":"antivirus service stopped and exclusions added before the payload ran","gold":["T1562.001"],"split":"tune","note":"defence evasion by tampering"}
+{"query":"unauthenticated remote code execution on a managed file transfer appliance","gold":["CVE-2023-34362","T1190"],"split":"tune","note":"product category rather than product name"}
+{"query":"new inbox rule forwarding mail to an external address","gold":["T1114","PB-PHISH-TRIAGE"],"split":"tune","note":"persistence inside a mailbox"}
+{"query":"process wrote into another process memory then created a remote thread","gold":["T1055"],"split":"tune","note":"injection by api sequence"}
+{"query":"domain controller replication request from a machine that is not a dc","gold":["T1003.003"],"split":"tune","note":"directory replication abuse"}
+{"query":"sudo heap overflow let any local user become root","gold":["CVE-2021-3156","T1068"],"split":"tune","note":"local privilege escalation cve"}
+{"query":"signed vendor update contained a backdoor delivered by the normal update channel","gold":["T1195.002","GHSA-SOLARWINDS-2020","GHSA-3CX-2023"],"split":"tune","note":"multiple valid gold entries"}
+{"query":"build pipeline secrets exfiltrated by a modified upload script","gold":["GHSA-CODECOV-2021","T1552.001"],"split":"tune","note":"ci credential theft"}
+{"query":"cleartext aws access key found in a committed configuration file","gold":["T1552.001","T1078.004"],"split":"tune","note":"secrets in source control"}
+{"query":"rdp session to a server from a workstation outside business hours","gold":["T1021.001","T1021"],"split":"tune","note":"interactive lateral movement"}
+{"query":"event logs cleared on a server with no maintenance window","gold":["T1070.001"],"split":"tune","note":"anti forensics"}
+{"query":"attacker added a federation trust to the identity provider","gold":["T1484","PB-IDENTITY-CLOUD"],"split":"tune","note":"tenant wide persistence"}
+{"query":"malicious maintainer published an infinite loop and broke our builds","gold":["GHSA-COLORS-FAKER-2022","T1195.001"],"split":"tune","note":"availability risk from a dependency, no attacker"}
+{"query":"http2 rapid reset caused a denial of service","gold":["CVE-2023-44487","T1499"],"split":"tune","note":"protocol level dos"}
+{"query":"printer service loaded a driver from a remote path and ran as system","gold":["CVE-2021-34527","T1068"],"split":"tune","note":"cve by mechanism"}
+{"query":"alert text told the agent to ignore its instructions and approve the action","gold":["PB-INJECTION-DEFENSE"],"split":"tune","note":"prompt injection handling must be retrievable"}
+{"query":"an account authenticated to a server it has never touched before","gold":["T1021","T1078"],"split":"test","note":"lateral movement stated purely as graph novelty"}
+{"query":"credentials read from memory then reused on three other machines","gold":["T1003","T1021.002","PB-LATERAL-SMB"],"split":"test","note":"the canonical middle of an intrusion"}
+{"query":"single source tried one common password against two hundred accounts","gold":["T1110.003","T1110"],"split":"test","note":"fan out rather than per account failures"}
+{"query":"brute force against our ssh service from one address","gold":["T1110","T1021.004"],"split":"test","note":"exact term, protocol context"}
+{"query":"spring framework class loader abuse wrote a file into the web root","gold":["CVE-2022-22965","T1190"],"split":"test","note":"framework rce by mechanism"}
+{"query":"struts content type header exploited for remote code execution","gold":["CVE-2017-5638","T1190"],"split":"test","note":"header based rce"}
+{"query":"unpatched vpn appliance let an attacker read session files with credentials","gold":["CVE-2019-11510","CVE-2018-13379","PB-EDGE-APPLIANCE"],"split":"test","note":"two cves share this description shape"}
+{"query":"heap overflow in the ssl vpn daemon gave code execution on the firewall","gold":["CVE-2022-42475","CVE-2024-3400"],"split":"test","note":"edge device pre auth rce"}
+{"query":"netlogon flaw let an unauthenticated attacker become domain admin","gold":["CVE-2020-1472"],"split":"test","note":"single unambiguous cve"}
+{"query":"smbv1 worm spread across a flat network","gold":["CVE-2017-0144","T1210"],"split":"test","note":"wormable internal exploitation"}
+{"query":"bluekeep pre auth rce in remote desktop services","gold":["CVE-2019-0708"],"split":"test","note":"query by nickname only"}
+{"query":"citrix appliance path traversal used to write a file and execute it","gold":["CVE-2019-19781","CVE-2023-3519"],"split":"test","note":"two citrix entries are both acceptable"}
+{"query":"confluence expression language injection gave remote code execution","gold":["CVE-2022-26134","T1213"],"split":"test","note":"wiki server compromise"}
+{"query":"vcenter management server compromised and guests encrypted","gold":["CVE-2021-22005","CVE-2021-21972","T1486"],"split":"test","note":"management plane to impact"}
+{"query":"attacker created a local admin account on a cisco router web interface","gold":["CVE-2023-20198","T1136"],"split":"test","note":"network device persistence"}
+{"query":"remote monitoring tool server taken over and used to reach every managed endpoint","gold":["CVE-2024-1709","T1219","T1199"],"split":"test","note":"msp trust abuse"}
+{"query":"openssl memory disclosure exposed private keys","gold":["CVE-2014-0160"],"split":"test","note":"heartbleed by effect"}
+{"query":"bash environment variable injection through a cgi script","gold":["CVE-2014-6271","T1190"],"split":"test","note":"shellshock by mechanism"}
+{"query":"kernel race condition let a web shell user escalate to root","gold":["CVE-2016-5195","CVE-2022-0847","T1068"],"split":"test","note":"two linux lpe cves acceptable"}
+{"query":"polkit helper abused for local root on every linux host","gold":["CVE-2021-4034","T1548"],"split":"test","note":"pwnkit"}
+{"query":"crafted rar archive ran a script instead of opening the document","gold":["CVE-2023-38831","T1204.002"],"split":"test","note":"user execution via archive"}
+{"query":"weblogic admin console reachable from the internet and exploited","gold":["CVE-2020-14882","T1190"],"split":"test","note":"exposed management console"}
+{"query":"f5 management interface authentication bypass ran commands as root","gold":["CVE-2022-1388","CVE-2020-5902"],"split":"test","note":"two big-ip entries acceptable"}
+{"query":"email security appliance exploited by sending a crafted attachment","gold":["CVE-2023-2868","T1190"],"split":"test","note":"security control as attack surface"}
+{"query":"exchange had a fixed validation key so any mailbox user could run code","gold":["CVE-2020-0688","T1078"],"split":"test","note":"authenticated rce on mail server"}
+{"query":"npm maintainer account taken over to ship a credential stealer","gold":["GHSA-UA-PARSER-2021","T1195.001"],"split":"test","note":"account takeover on a registry"}
+{"query":"someone volunteered to maintain an abandoned library then backdoored a transitive dependency","gold":["GHSA-EVENT-STREAM-2018","T1195.001"],"split":"test","note":"maintainer handover risk"}
+{"query":"internal package name claimed on the public registry so the resolver picked the attacker version","gold":["GHSA-TORCHTRITON-2022","T1195.001"],"split":"test","note":"dependency confusion stated precisely"}
+{"query":"dependency wiped files based on the machine's country","gold":["GHSA-NODE-IPC-2022","T1485"],"split":"test","note":"destructive protestware"}
+{"query":"our fourth order dependency is unmaintained and carries known cves","gold":["T1195.001","T1195","PB-SUPPLY-DEP"],"split":"test","note":"supply chain risk framing from the graph layer"}
+{"query":"how should I respond when a library we depend on shipped malware","gold":["PB-SUPPLY-DEP"],"split":"test","note":"procedural, playbook expected"}
+{"query":"what do I do first when a perimeter appliance is confirmed compromised","gold":["PB-EDGE-APPLIANCE"],"split":"test","note":"procedural, playbook expected"}
+{"query":"steps to investigate a suspected beacon on an endpoint","gold":["PB-C2-BEACON"],"split":"test","note":"procedural, playbook expected"}
+{"query":"phishing victim submitted credentials and the session was hijacked","gold":["PB-PHISH-TRIAGE","T1566.002","T1550"],"split":"test","note":"token survives a password reset"}
+{"query":"cloud identity compromised and a new service principal credential appeared","gold":["T1098","PB-IDENTITY-CLOUD","T1078.004"],"split":"test","note":"durable cloud persistence"}
+{"query":"data uploaded to a cloud storage provider by a process that is not the sync client","gold":["T1567.002","PB-EXFIL-VOLUME"],"split":"test","note":"exfiltration to a reputable destination"}
+{"query":"exfiltration split into many small transfers to stay under thresholds","gold":["T1030","T1048"],"split":"test","note":"chunking"}
+{"query":"beacon that sent kilobytes for days suddenly uploaded gigabytes","gold":["T1041","PB-EXFIL-VOLUME"],"split":"test","note":"volume inversion on an existing channel"}
+{"query":"malicious code ran inside a signed system binary with no file on disk","gold":["T1620","T1055"],"split":"test","note":"fileless execution"}
+{"query":"legitimate signed binary used to execute a remote payload","gold":["T1218","T1218.011"],"split":"test","note":"living off the land"}
+{"query":"library loaded from a user writable folder by a signed application","gold":["T1574"],"split":"test","note":"search order hijacking"}
+{"query":"malware exited immediately after checking cpu count and uptime","gold":["T1497"],"split":"test","note":"sandbox evasion"}
+{"query":"payload decoded on the host using a built in windows utility","gold":["T1140"],"split":"test","note":"deobfuscation with a system tool"}
+{"query":"binary named like a system process but running from the user profile","gold":["T1036.005","T1036"],"split":"test","note":"masquerading"}
+{"query":"attacker disabled accounts for the response team during the incident","gold":["T1531"],"split":"test","note":"impact against responders"}
+{"query":"database and backup services stopped in bulk seconds before encryption","gold":["T1489","PB-RANSOMWARE-PRE"],"split":"test","note":"lock release before encryption"}
+{"query":"compute usage spiked and the host connected to a mining pool","gold":["T1496"],"split":"test","note":"resource hijacking"}
+{"query":"system library replaced so adversary code runs on every authentication","gold":["T1554"],"split":"test","note":"binary backdoor persistence"}
+{"query":"traffic routed through an internal host acting as a relay","gold":["T1090","T1572"],"split":"test","note":"proxying and tunnelling"}
+{"query":"failed resolutions for hundreds of random looking domains from one host","gold":["T1568.002"],"split":"test","note":"domain generation algorithm"}
+{"query":"downloaded tooling onto the host with a built in transfer utility","gold":["T1105"],"split":"test","note":"ingress tool transfer"}
+{"query":"attacker enumerated privileged group membership from a normal user account","gold":["T1069","PB-SCAN-TRIAGE"],"split":"test","note":"target selection"}
+{"query":"one account read an abnormal number of files from the finance share","gold":["T1039","T1005"],"split":"test","note":"collection from a file server"}
+{"query":"apache path normalisation flaw allowed reading files outside the document root","gold":["CVE-2021-41773","T1190"],"split":"test","note":"path traversal"}
+{"query":"video codec bug exploited through rendered content in the browser","gold":["CVE-2023-5217","T1203"],"split":"test","note":"embedded media library"}
+{"query":"laravel application deployed with debug mode enabled got remote code execution","gold":["CVE-2021-3129"],"split":"test","note":"configuration caused exposure"}
+{"query":"drupal site unmaintained for years and exploited by a form api flaw","gold":["CVE-2018-7600"],"split":"test","note":"unowned cms"}
+{"query":"sudo delegation rule with a negation was bypassed to run as root","gold":["CVE-2019-14287","T1548"],"split":"test","note":"policy logic bypass"}
+{"query":"the first log4j patch was incomplete and we had to remediate twice","gold":["CVE-2021-45046","CVE-2021-44228"],"split":"test","note":"follow up advisory"}
+{"query":"proxyshell path confusion used for pre authentication access to exchange","gold":["CVE-2021-34473","T1190"],"split":"test","note":"campaign nickname plus mechanism"}
+{"query":"exchange mitigation rules were bypassed within days of publication","gold":["CVE-2022-41040"],"split":"test","note":"mitigation is not a patch"}
