@@ -504,6 +504,193 @@ def run_policy(*, n_episodes: int) -> dict[str, Any]:
     }
 
 
+def run_augmentation(*, n: int, seed: int) -> dict[str, Any]:
+    """Measure diffusion augmentation and the calibration probe (PRD Section 5.5.5).
+
+    Reports the augmentation delta at several scarcity levels rather than one, because
+    the single-number version of this result is misleading: at full data the effect is
+    approximately zero, and the sign flips depending on how much real data the
+    generator had to learn from.
+
+    The calibration probe is reported alongside it because that is where the generator
+    earns its place. The raw softmax confidence fails its gates; the same classifier
+    with a novelty-gated confidence passes them.
+    """
+    from collections import Counter
+
+    from sentinel.ml.anomaly import build_default_ensemble
+    from sentinel.ml.classify import FamilyClassifier
+    from sentinel.ml.datasets.synthetic import generate_alerts
+    from sentinel.ml.diffusion import TabularDiffusion
+    from sentinel.ml.featurestore import AlertVectorizer
+    from sentinel.ml.robustness import (
+        GATE_MAX_OVERCONFIDENCE,
+        NoveltyGate,
+        RobustnessError,
+        assert_calibration_holds,
+        augment_training_set,
+        boundary_adjacent_samples,
+        calibration_report,
+        gated_calibration_report,
+        gated_robustness_curve,
+        robustness_curve,
+    )
+
+    rare = ("web_attack", "botnet", "infiltration", "brute_force")
+
+    print()
+    print("=" * 72)
+    print("Section 5.5.5 - diffusion augmentation and the calibration probe")
+    print("=" * 72)
+
+    alerts = generate_alerts(n, seed=seed)
+    vectorizer = AlertVectorizer().fit(alerts)
+    matrix = vectorizer.transform(alerts)
+    families = np.asarray([a.ground_truth_label or "benign" for a in alerts])
+    order = np.random.default_rng(7).permutation(len(families))
+    cut = int(0.6 * len(order))
+    x_train, f_train = matrix[order[:cut]], families[order[:cut]]
+    x_test, f_test = matrix[order[cut:]], list(families[order[cut:]])
+    print(f"  {cut} training rows, {len(f_test)} held out; no synthetic row reaches the")
+    print("  held-out split, and the majority class is passed through unchanged.")
+
+    def rare_macro(model: Any, xs: np.ndarray, fs: list[str]) -> float:
+        per_family = model.recall_by_family(xs, fs)
+        return float(np.mean([per_family.get(name, 0.0) for name in rare]))
+
+    print()
+    print("  augmentation delta by scarcity level (held-out rare-family macro recall):")
+    print(f"    {'cap':>6} {'real':>6} {'synth':>6} {'base':>8} {'augmented':>10} {'delta':>8}")
+    levels: dict[str, Any] = {}
+    for cap in (None, 200, 60, 25, 12):
+        if cap is None:
+            subset_x, subset_f = x_train, list(f_train)
+        else:
+            keep: list[int] = []
+            seen: Counter = Counter()
+            for index, family in enumerate(f_train):
+                if family in rare:
+                    if seen[family] >= cap:
+                        continue
+                    seen[family] += 1
+                keep.append(index)
+            chosen = np.asarray(keep)
+            subset_x, subset_f = x_train[chosen], list(f_train[chosen])
+
+        mask = np.isin(np.asarray(subset_f), rare)
+        generator = TabularDiffusion(
+            n_steps=200, epochs=250, hidden=(160, 160), seed=1, min_rows_per_family=8
+        ).fit(subset_x[mask], list(np.asarray(subset_f)[mask]))
+        augmented = augment_training_set(
+            subset_x, subset_f, generator=generator, multiplier=6.0 if cap else 3.0,
+            rng=np.random.default_rng(11),
+        )
+        baseline = FamilyClassifier(seed=5).fit(subset_x, subset_f)
+        boosted = FamilyClassifier(seed=5).fit(augmented.x, list(augmented.families))
+        before = rare_macro(baseline, x_test, f_test)
+        after = rare_macro(boosted, x_test, f_test)
+        label = "full" if cap is None else str(cap)
+        levels[label] = {
+            "real_rare_rows": int(mask.sum()),
+            "synthetic_rows": augmented.n_synthetic,
+            "baseline_rare_macro": before,
+            "augmented_rare_macro": after,
+            "delta": after - before,
+        }
+        print(
+            f"    {label:>6} {int(mask.sum()):>6} {augmented.n_synthetic:>6} "
+            f"{before:>8.3f} {after:>10.3f} {after - before:>+8.3f}"
+        )
+    print("  Augmentation is not a remedy for genuine rarity: the regime that wants it")
+    print("  most is the regime where the generator has too little to model.")
+
+    classifier = FamilyClassifier(seed=5).fit(x_train, list(f_train))
+    weighted = FamilyClassifier(seed=5, class_weight="balanced").fit(
+        x_train, list(f_train)
+    )
+    print()
+    print("  the one-line alternative, for comparison:")
+    print(
+        f"    unweighted macro={classifier.macro_recall(x_test, f_test):.3f}   "
+        f"class-weighted macro={weighted.macro_recall(x_test, f_test):.3f}"
+    )
+
+    support = build_default_ensemble()
+    support.fit(x_train)
+    gate = NoveltyGate(quantile=0.99).fit(support.score(x_train))
+    raw = robustness_curve(classifier, x_test, f_test, rng=np.random.default_rng(13))
+    gated = gated_robustness_curve(
+        classifier, x_test, f_test, novelty_fn=support.score, gate=gate,
+        rng=np.random.default_rng(13),
+    )
+    rows, left, _ = boundary_adjacent_samples(
+        classifier, x_test, f_test, n_samples=300, rng=np.random.default_rng(17)
+    )
+
+    print()
+    print("  calibration under perturbation - raw softmax confidence:")
+    for report in raw:
+        print(f"    {report.summary()}")
+    print(f"    {calibration_report(classifier, rows, left, label='boundary').summary()}")
+    raw_peak = max(report.overconfidence for report in raw)
+    print(f"    peak overconfidence {raw_peak:+.3f}")
+
+    print()
+    print("  calibration under perturbation - novelty-gated confidence:")
+    for report in gated:
+        print(f"    {report.summary()}")
+    boundary = gated_calibration_report(
+        classifier, rows, left, novelty=support.score(rows), gate=gate, label="boundary"
+    )
+    print(f"    {boundary.summary()}")
+    gated_peak = max(report.overconfidence for report in gated)
+    print(f"    peak overconfidence {gated_peak:+.3f}")
+
+    raw_fails = True
+    try:
+        assert_calibration_holds(raw)
+        raw_fails = False
+    except RobustnessError:
+        pass
+
+    passed = True
+    stats: dict[str, float] = {}
+    print()
+    try:
+        stats = assert_calibration_holds(gated, boundary=boundary)
+        print(f"  PASS  novelty-gated calibration     peak {gated_peak:+.3f}   "
+              f"gate <= {GATE_MAX_OVERCONFIDENCE:.2f}")
+    except RobustnessError as exc:
+        passed = False
+        print(f"  FAIL  novelty-gated calibration     {exc}")
+    if raw_fails:
+        print("  PASS  the probe has teeth           raw softmax correctly rejected")
+    else:
+        passed = False
+        print("  FAIL  the probe has teeth           raw softmax passed; probe is vacuous")
+
+    return {
+        "levels": levels,
+        "unweighted_macro": classifier.macro_recall(x_test, f_test),
+        "class_weighted_macro": weighted.macro_recall(x_test, f_test),
+        "raw_peak_overconfidence": raw_peak,
+        "gated_peak_overconfidence": gated_peak,
+        "raw_curve": [
+            {"label": r.label, "accuracy": r.accuracy, "confidence": r.mean_confidence,
+             "ece": r.ece, "overconfidence": r.overconfidence}
+            for r in raw
+        ],
+        "gated_curve": [
+            {"label": r.label, "accuracy": r.accuracy, "confidence": r.mean_confidence,
+             "ece": r.ece, "overconfidence": r.overconfidence}
+            for r in gated
+        ],
+        "gated_stats": stats,
+        "raw_correctly_rejected": raw_fails,
+        "s555_calibration_pass": passed,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Sentinel Mesh offline evaluation")
     parser.add_argument("--n", type=int, default=20000, help="alerts to generate")
@@ -544,6 +731,12 @@ def main() -> int:
         help="also evaluate the contextual-bandit response policy (PRD F-09)",
     )
     parser.add_argument(
+        "--augment",
+        action="store_true",
+        help="also evaluate diffusion augmentation and the calibration probe "
+        "(PRD Section 5.5.5)",
+    )
+    parser.add_argument(
         "--episodes",
         type=int,
         default=200,
@@ -567,6 +760,8 @@ def main() -> int:
         result["knowledge_base"] = run_kb(k=args.kb_k)
     if args.policy:
         result["response_policy"] = run_policy(n_episodes=args.episodes)
+    if args.augment:
+        result["augmentation"] = run_augmentation(n=args.n, seed=args.seed)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
@@ -581,6 +776,8 @@ def main() -> int:
         passed = passed and bool(result["knowledge_base"]["f05_retrieval_pass"])
     if args.policy:
         passed = passed and bool(result["response_policy"]["f09_regret_pass"])
+    if args.augment:
+        passed = passed and bool(result["augmentation"]["s555_calibration_pass"])
     return 0 if passed else 1
 
 

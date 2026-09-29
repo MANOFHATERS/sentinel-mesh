@@ -67,6 +67,8 @@ __all__ = [
     "gradient_check",
     "mse_loss",
     "sigmoid",
+    "softmax",
+    "softmax_cross_entropy_loss",
     "train",
 ]
 
@@ -396,6 +398,67 @@ def mse_loss(prediction: np.ndarray, target: np.ndarray) -> tuple[float, np.ndar
     diff = pred - truth
     loss = float(np.mean(np.square(diff)))
     return loss, (2.0 / diff.size) * diff
+
+
+def softmax_cross_entropy_loss(
+    logits: np.ndarray, target: np.ndarray
+) -> tuple[float, np.ndarray]:
+    """Multi-class cross entropy from logits, with its gradient.
+
+    ``target`` is one-hot with the same shape as ``logits``, rather than an integer
+    index array. That is not the conventional API and it is the right one here:
+    :data:`LossFn` is ``(prediction, target) -> (loss, grad)`` with both arrays the
+    same shape, which is what lets :func:`train` and :func:`gradient_check` treat
+    every loss identically. An index-based variant would need its own batching path
+    and its own gradient check, and the one-hot matrix costs nothing at these widths.
+
+    It also permits *soft* targets, which matters for Part 2.2: label smoothing and
+    mixup-style interpolation both produce non-integral targets, and a loss that
+    accepts only hard labels quietly rules them out.
+
+    Numerics
+    --------
+    The log-sum-exp is shifted by the row maximum before exponentiating. Without
+    that, a logit of 800 overflows to ``inf`` and the loss becomes ``nan`` several
+    thousand steps into training, which presents as "the model diverged" rather than
+    as an arithmetic bug. The shift is exact, not an approximation: subtracting a
+    per-row constant leaves the softmax unchanged.
+
+    The gradient is the textbook ``(softmax - target) / n_rows``, averaged over rows
+    so the effective learning rate does not depend on batch size.
+    """
+    scores = np.asarray(logits, dtype=DTYPE)
+    truth = np.asarray(target, dtype=DTYPE)
+    if scores.shape != truth.shape:
+        raise ValueError(
+            f"softmax_cross_entropy_loss shape mismatch: {scores.shape} vs {truth.shape}"
+        )
+    if scores.ndim != 2:
+        raise ValueError(
+            f"softmax_cross_entropy_loss expects 2-D (rows, classes), got {scores.shape}"
+        )
+    if scores.size == 0:
+        raise ValueError("softmax_cross_entropy_loss on an empty batch")
+    if np.any(truth < 0.0):
+        raise ValueError("target contains negative probabilities")
+
+    shifted = scores - np.max(scores, axis=1, keepdims=True)
+    exponentiated = np.exp(shifted)
+    partition = np.sum(exponentiated, axis=1, keepdims=True)
+    log_probabilities = shifted - np.log(partition)
+    probabilities = exponentiated / partition
+
+    n_rows = scores.shape[0]
+    loss = float(-np.sum(truth * log_probabilities) / n_rows)
+    return loss, (probabilities - truth) / n_rows
+
+
+def softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
+    """Numerically stable softmax. Shares the shift with the loss above."""
+    scores = np.asarray(x, dtype=DTYPE)
+    shifted = scores - np.max(scores, axis=axis, keepdims=True)
+    exponentiated = np.exp(shifted)
+    return exponentiated / np.sum(exponentiated, axis=axis, keepdims=True)
 
 
 # --------------------------------------------------------------------------- #
