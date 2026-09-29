@@ -379,6 +379,131 @@ def run_kb(*, k: int) -> dict[str, Any]:
     }
 
 
+def run_policy(*, n_episodes: int) -> dict[str, Any]:
+    """Measure the contextual-bandit response policy (PRD F-09, Section 5.5.4).
+
+    Reported across :data:`~sentinel.rl.simulate.REPORTING_SEEDS` only, against a
+    non-learning baseline on the same seeds. Both are needed: "regret fell" is only
+    interesting next to "a policy that learns nothing does not produce that curve".
+
+    Per-tier results are printed because the action mask changes the problem, not just
+    the permissions -- at ``observe`` the policy has two arms instead of four, so its
+    regret is measured against a different oracle and the numbers are not comparable
+    across rows.
+    """
+    from sentinel.core.schemas import RiskTier
+    from sentinel.rl import (
+        ALL_ACTIONS,
+        REPORTING_SEEDS,
+        aggregate,
+        assert_f09_gates,
+        replay_many_seeds,
+    )
+    from sentinel.rl.simulate import (
+        GATE_MEAN_SUBLINEARITY,
+        GATE_OPTIMAL_ACTION_RATE,
+        GATE_REGRET_RATIO,
+        GATE_WORST_SUBLINEARITY,
+    )
+
+    print()
+    print("=" * 72)
+    print("F-09 / Section 5.5.4 - contextual bandit response policy")
+    print("=" * 72)
+
+    learned = replay_many_seeds(seeds=REPORTING_SEEDS, n_episodes=n_episodes)
+    baseline = replay_many_seeds(
+        seeds=REPORTING_SEEDS, n_episodes=n_episodes, random_policy=True
+    )
+    stats = aggregate(learned)
+    reference = aggregate(baseline)
+    ratio = stats["mean_total_regret"] / reference["mean_total_regret"]
+
+    print(f"  {len(REPORTING_SEEDS)} held-out seeds, {n_episodes} episodes each:")
+    for result in learned:
+        print(f"    {result.summary()}")
+
+    print()
+    print(f"  {'metric':<26} {'policy':>10} {'no-learning':>12}")
+    for label, key in (
+        ("total regret", "mean_total_regret"),
+        ("first-quarter regret", "mean_first_quarter_regret"),
+        ("last-quarter regret", "mean_last_quarter_regret"),
+        ("sublinearity", "mean_sublinearity"),
+        ("optimal-action rate", "mean_optimal_action_rate"),
+        ("mean reward", "mean_reward"),
+    ):
+        print(f"  {label:<26} {stats[key]:>10.3f} {reference[key]:>12.3f}")
+
+    counts: dict[str, int] = {}
+    for result in learned:
+        for action in ALL_ACTIONS:
+            counts[action.value] = counts.get(action.value, 0) + result.action_counts[
+                action
+            ]
+    print(f"  action mix: {counts}")
+
+    print()
+    checks = {
+        "mean sublinearity": (stats["mean_sublinearity"], GATE_MEAN_SUBLINEARITY, True),
+        "worst sublinearity": (
+            stats["worst_sublinearity"],
+            GATE_WORST_SUBLINEARITY,
+            True,
+        ),
+        "regret vs baseline": (ratio, GATE_REGRET_RATIO, False),
+        "optimal-action rate": (
+            stats["mean_optimal_action_rate"],
+            GATE_OPTIMAL_ACTION_RATE,
+            True,
+        ),
+        "tier violations": (stats["total_violations"], 0.0, False),
+    }
+    passed = True
+    for label, (value, gate, higher_is_better) in checks.items():
+        ok = value >= gate if higher_is_better else value <= gate
+        passed = passed and ok
+        arrow = ">=" if higher_is_better else "<="
+        print(
+            f"  {'PASS' if ok else 'FAIL'}  {label:<22} {value:.3f}   "
+            f"gate {arrow} {gate:.2f}"
+        )
+
+    per_tier: dict[str, Any] = {}
+    print()
+    print("  per trust tier (regret is against that tier's own masked oracle):")
+    for tier in RiskTier:
+        tier_learned = replay_many_seeds(
+            seeds=REPORTING_SEEDS, n_episodes=n_episodes, tier=tier
+        )
+        tier_stats = aggregate(tier_learned)
+        per_tier[tier.value] = tier_stats
+        print(
+            f"    {tier.value:<18} regret={tier_stats['mean_total_regret']:7.2f} "
+            f"sublinear={tier_stats['mean_sublinearity']:+.1%} "
+            f"optimal={tier_stats['mean_optimal_action_rate']:.1%} "
+            f"violations={int(tier_stats['total_violations'])}"
+        )
+        passed = passed and tier_stats["total_violations"] == 0.0
+
+    try:
+        assert_f09_gates(learned, baseline)
+    except Exception as exc:  # reported below rather than swallowed
+        passed = False
+        print(f"\n  gate assertion failed: {exc}")
+
+    return {
+        "episodes": n_episodes,
+        "seeds": list(REPORTING_SEEDS),
+        "policy": stats,
+        "baseline": reference,
+        "regret_ratio": ratio,
+        "action_mix": counts,
+        "per_tier": per_tier,
+        "f09_regret_pass": passed,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Sentinel Mesh offline evaluation")
     parser.add_argument("--n", type=int, default=20000, help="alerts to generate")
@@ -413,6 +538,17 @@ def main() -> int:
     parser.add_argument(
         "--kb-k", type=int, default=5, help="cut-off for the F-05 retrieval metrics"
     )
+    parser.add_argument(
+        "--policy",
+        action="store_true",
+        help="also evaluate the contextual-bandit response policy (PRD F-09)",
+    )
+    parser.add_argument(
+        "--episodes",
+        type=int,
+        default=200,
+        help="episodes per seed for the F-09 replay; the PRD names 200",
+    )
     parser.add_argument("--out", type=Path, default=Path("data/artifacts/evaluation.json"))
     args = parser.parse_args()
 
@@ -429,6 +565,8 @@ def main() -> int:
         result["supply_chain"] = run_graph(seed=args.seed, top_k=args.top_k)
     if args.kb:
         result["knowledge_base"] = run_kb(k=args.kb_k)
+    if args.policy:
+        result["response_policy"] = run_policy(n_episodes=args.episodes)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
@@ -441,6 +579,8 @@ def main() -> int:
         passed = passed and bool(result["supply_chain"]["f06_top_k_pass"])
     if args.kb:
         passed = passed and bool(result["knowledge_base"]["f05_retrieval_pass"])
+    if args.policy:
+        passed = passed and bool(result["response_policy"]["f09_regret_pass"])
     return 0 if passed else 1
 
 
