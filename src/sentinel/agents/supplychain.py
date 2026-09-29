@@ -291,6 +291,8 @@ class SupplyChainAgent:
         alert: Alert,
         model: SupplyChainGNN | None = None,
         scores: np.ndarray | None = None,
+        shares: np.ndarray | None = None,
+        include: Sequence[str] = (),
         now: datetime | None = None,
     ) -> SupplyChainAssessment:
         """Score ``graph``, explain the top ``top_k``, and build a cited report.
@@ -301,6 +303,13 @@ class SupplyChainAgent:
         gets the exposure paths — and because the offline evaluation already has the
         scores in hand and re-running the forward pass would be measuring a different
         thing than it reported.
+
+        ``shares`` (Part 5) is the model's neighbourhood attribution precomputed on a
+        larger graph that ``graph`` was cut from — see
+        :func:`~sentinel.graph.explain.neighbourhood_shares`. When given, the model is
+        not re-run, because a full-graph GNN cannot be fed a subgraph. ``include``
+        names nodes explained whatever their rank (an advisory's own package), and a
+        finding's ``rank`` is always its true position in the score order.
         """
         created_at = now or self.clock.now()
         if scores is None:
@@ -318,13 +327,23 @@ class SupplyChainAgent:
             )
 
         explanations = top_risk_explanations(
-            graph, values, model=model, k=self.top_k, max_hops=self.max_hops
+            graph,
+            values,
+            model=None if shares is not None else model,
+            k=self.top_k,
+            shares=shares,
+            include=include,
+            max_hops=self.max_hops,
         )
+        order = np.argsort(-values, kind="stable")
+        rank_of = {graph.nodes[int(i)].node_id: position + 1 for position, i in enumerate(order)}
         findings = tuple(
             VendorRiskFinding(
-                explanation=explanation, rank=index + 1, risk_score=explanation.risk_score
+                explanation=explanation,
+                rank=rank_of[explanation.node_id],
+                risk_score=explanation.risk_score,
             )
-            for index, explanation in enumerate(explanations)
+            for explanation in explanations
         )
 
         evidence, technique_refs = self._gather(findings)
@@ -716,10 +735,13 @@ def _assess_node(
     graph: SupplyChainGraph,
     model: SupplyChainGNN | None,
     scores: np.ndarray | None,
+    shares: np.ndarray | None = None,
+    include: Sequence[str] = (),
 ):
     def node(state: IncidentState, ctx: RunContext) -> IncidentState:
         assessment = agent.assess(
-            graph, alert=state.alert, model=model, scores=scores, now=ctx.now()
+            graph, alert=state.alert, model=model, scores=scores, shares=shares,
+            include=include, now=ctx.now(),
         )
         _audit(
             ctx,
@@ -967,6 +989,8 @@ def build_supply_chain_review_graph(
     graph: SupplyChainGraph,
     model: SupplyChainGNN | None = None,
     scores: np.ndarray | None = None,
+    shares: np.ndarray | None = None,
+    include: Sequence[str] = (),
     connector=None,
     checkpointer=None,
     step_budget: int = SUPPLY_CHAIN_STEP_BUDGET,
@@ -998,7 +1022,7 @@ def build_supply_chain_review_graph(
     from sentinel.agents.contain import SimulatedConnector
 
     spec = GraphSpec()
-    spec.add_node(NODE_ASSESS, _assess_node(agent, graph, model, scores))
+    spec.add_node(NODE_ASSESS, _assess_node(agent, graph, model, scores, shares, tuple(include)))
     spec.add_node(NODE_APPROVE, _approve_node())
     spec.add_node(NODE_REMEDIATE, _remediate_node(connector or SimulatedConnector()))
     spec.add_node("finish", _finish)

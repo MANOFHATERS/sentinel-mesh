@@ -27,6 +27,13 @@ dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.4", "mypy>=1.10"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Non-Python files the package needs at runtime. The knowledge-base corpus has been
+# read from src/ since Part 2.4 and only worked because installs were editable; the
+# dashboard's static front end is Part 5.
+[tool.setuptools.package-data]
+"sentinel.kb" = ["data/*.jsonl"]
+"sentinel.dashboard" = ["static/*.html", "static/*.css", "static/js/*.js"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
@@ -36,7 +43,12 @@ markers = [
     "needs_redis: requires a live Redis server on localhost",
     "needs_real_data: requires CIC-IDS2017 / UNSW-NB15 CSVs in data/raw",
 ]
-filterwarnings = ["error::DeprecationWarning:sentinel.*"]
+filterwarnings = [
+    "error::DeprecationWarning:sentinel.*",
+    # Starlette's TestClient still runs on httpx 0.x; the warning is about the test
+    # client's transport, not about anything this repository calls.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]
 
 [tool.ruff]
 line-length = 100

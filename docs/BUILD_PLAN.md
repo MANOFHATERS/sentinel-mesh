@@ -8,30 +8,34 @@ with code but no test is listed as *partial*.
 
 ## Where things stand, and what the next session builds
 
-Parts 1, 2, 3 and 4 are complete. **All five PRD agents exist**, on three checkpointed
-graphs that share one state machine, one Human Approval Gate and one audit chain, and
-since Part 4 every approved action leaves the process through **real HTTP connectors**
-(Wazuh, SCIM, GitHub, Slack/webhooks) behind a least-privilege router. Every acceptance
-criterion except **F-10** is met and measured by one command, which exits non-zero if any
-gate fails:
+**All five parts are complete, and every PRD acceptance criterion F-01 to F-12 is met**
+and measured by one command, which exits non-zero if any gate fails. All five PRD
+agents run on three checkpointed graphs that share one state machine, one Human Approval
+Gate and one audit chain; every approved action leaves the process through real HTTP
+connectors behind a least-privilege router; and since Part 5 an analyst drives all of
+it from the **Analyst Copilot dashboard** — all three demo scenarios complete end to end
+from the UI alone (F-10).
 
 ```bash
 python scripts/evaluate.py --n 20000 --cross-dataset --graph --kb --policy \
-    --agents --codescan --supplychain --connectors
+    --agents --codescan --supplychain --connectors --dashboard
+python -m sentinel.dashboard      # the Analyst Copilot on http://127.0.0.1:8765/
 ```
 
-`2,991 tests passing`, 0 failing, ruff clean.
+`3,121 tests passing` (plus 29 front-end tests under `node --test`, run from pytest),
+ruff clean. One timing test — F-11's 50k-row verification — exceeded its 1 s budget
+under a 4-worker parallel run and passes alone; see the Part 5 caveats.
 
-**The next session builds Part 5, the Analyst Copilot dashboard (F-10)** — the last PRD
-criterion. Its data sources already exist as functions (see the Part 5 section below),
-and two Part 4 findings are requirements for it: a failed action inside a completed run
-must be visible, and the router's refusals must be shown with their reasons.
+**The next session starts the PRD's 90-day post-sprint plan (Section 4.2).** In order:
+(1) point the Wazuh connector at a real free-tier Wazuh instance — the first real
+external service; (2) make the first real LLM calls through `AnthropicEngine` and
+measure what they add to investigation narratives against the `NullEngine` baseline;
+(3) replace the synthetic supply-chain graph with CycloneDX SBOM ingestion, which also
+lets the Supply-Chain Agent draft a real dependency-manifest change.
 
-Standing gaps, none blocking: **no LLM has actually been called** (`AnthropicEngine` is
-tested against a fake transport; every number here was produced with `NullEngine`),
-**no connector has talked to a real service** (they are tested against strict local
-emulators of the documented APIs), and **`mypy --strict` has not been run** because it
-is not installed in this environment.
+Standing gaps, none blocking: **no LLM has actually been called**, **no connector has
+talked to a real service** (strict local emulators of the documented APIs), and
+**`mypy --strict` has not been run** because it is not installed in this environment.
 
 ---
 
@@ -1075,32 +1079,145 @@ Every one was found by a test or a measurement, not anticipated.
 - **Still no LLM call.** Nothing in Part 4 depends on one — no engine output reaches a
   connector argument.
 
-## Part 5 — Analyst Copilot dashboard (F-10, Layer 6)
+## Part 5 — Analyst Copilot dashboard (F-10, Layer 6) ✅ COMPLETE
 
-The last PRD criterion. Next.js + d3-force per the PRD; the three demo scenarios must be
-completable end-to-end from the UI alone. Every data source already exists as a function
-rather than a new query path:
+**All three PRD demo scenarios complete end to end from the UI alone**, and that is
+measured, not asserted: `scripts/evaluate.py --dashboard` starts the real app under
+uvicorn on a loopback port and completes every scenario with nothing but HTTP calls and
+a bearer token, then reads the outcome back from the remote systems' side of the wire.
+Every scenario was also walked through by hand in a browser during the build.
 
-| View | Source |
-|---|---|
-| Approval queue (all three graphs) | `CompiledGraph.pending()`, ordered by `approval_queue()` |
-| Approve / reject | `CompiledGraph.resume(thread_id, HumanDecision(...))` |
-| Crash recovery | `CompiledGraph.recover(thread_id)` (Part 4) |
-| Investigation timeline | `HashChainedAuditLog.iter_records()` |
-| What actually happened on the wire | `connector_called` rows; `ConnectorRouter.executions` / `.refusals` (Part 4) |
-| Supply-chain map | `top_risk_explanations()`, `explain_node()` |
-| Code-scan view | `ScanResult.summary()`, `PullRequestDraft.body`, the PR `reference` URL |
-| Evaluation report (F-12) | `data/artifacts/evaluation.json` from `scripts/evaluate.py` |
+```bash
+python -m sentinel.dashboard            # prints one-time tokens, serves http://127.0.0.1:8765/
+```
 
-Two Part 4 findings are dashboard requirements, not nice-to-haves: a **failed action
-inside a completed run** must be visible (finding 5), and the **router's refusals**
-(protected target, blast radius, wrong tenant) must be shown with their reasons, because
-a guardrail that fires silently is one nobody tunes.
+### Delivered
 
-The dashboard needs a thin HTTP API over those functions (`fastapi` is already in the
-`[api]` extra). That API is itself an outward-facing surface and gets the same treatment
-as a connector: authenticated, tenant-scoped, and every approval it records must name a
-real approver.
+| PRD ref | What | Where | Verified by |
+|---|---|---|---|
+| §9.2 | The three scripted scenarios: phishing → lateral movement, vendor-dependency CVE, malicious open-source package | [dashboard/scenarios.py](../src/sentinel/dashboard/scenarios.py) | `tests/unit/test_dashboard_scenarios.py` (25) |
+| **F-10**, F-04 | One tenant's live mesh: three graphs, shared checkpoint store, audit chain, journal, router, sandbox; restart- and crash-safe | [dashboard/workspace.py](../src/sentinel/dashboard/workspace.py) | `tests/integration/test_dashboard_workspace.py` (24) |
+| **F-10** | JSON views: queue, incident detail, wire, supply-chain map, code scan, audit, F-12 report | [dashboard/views.py](../src/sentinel/dashboard/views.py) | `tests/unit/test_dashboard_views.py` (6) + API suite |
+| §5.7 | Bearer tokens (digest-only registry), tenant scoping, analyst/viewer roles, approver from the token | [dashboard/auth.py](../src/sentinel/dashboard/auth.py) | `tests/unit/test_dashboard_auth.py` (34) |
+| **F-10** | FastAPI app, strict CSP, error mapping, static front end | [dashboard/app.py](../src/sentinel/dashboard/app.py) | `tests/integration/test_dashboard_api.py` (32) |
+| **F-10** | Zero-build front end: `textContent`-only DOM helper, API client, d3-force-semantics layout, SVG map, all views | [dashboard/static/](../src/sentinel/dashboard/static/) | `tests/js/*.test.mjs` (29, `node --test`), run from pytest |
+| F-06 | Scoped explanation: precomputed `shares=`, forced `include=`; the parallel-edge fix | [graph/explain.py](../src/sentinel/graph/explain.py) | `tests/unit/test_graph_explain_scoped.py` (9) |
+| **F-12** | `--dashboard` gate: the whole F-10 run over a real socket | [scripts/evaluate.py](../scripts/evaluate.py) | exits non-zero on any failed gate |
+
+### Measured results
+
+From `python scripts/evaluate.py ... --dashboard` (seed 20260928, dashboard models on
+12,000 flows):
+
+```
+[scenarios over HTTP] 3/3 complete · 7 decisions (1 rejected)
+  phishing-lateral   3/3 runs finished · 3 decision(s) · 1 failed action(s) · complete
+  vendor-cve         2/2 runs finished · 2 decision(s) · 0 failed action(s) · complete
+  malicious-package  2/2 runs finished · 2 decision(s) · 0 failed action(s) · complete
+  Wazuh isolated ['10.20.4.17', '10.20.8.30'] · blocked [] · GitHub issues 2 · draft PRs 1 · merges 0
+[Part 4 requirements, as the dashboard shows them]
+  failed action in a completed run  [('block_ip', '10.20.0.5')]
+  router refusal reason             TargetRejected: 10.20.0.5 is inside protected network 10.20.0.0/28 ...
+[boundary] 22/22 probes refused as required (401 without a token, 403 viewer, 422 forged approver, 404 cross-tenant)
+[F-08 through the dashboard] ungated 0 · chain verified (70 rows) · 7 decisions, by ['maya@acme.example']
+[F-12] dashboard serves exactly the gates this run computed
+```
+
+What each scenario exercises:
+
+| Scenario | Graphs | Agents | What the analyst sees and does |
+|---|---|---|---|
+| Phishing → lateral movement | incident ×3 | triage, investigation, containment | approve isolating ws-fin-07; reject the redundant block; approve blocking the jump host — **the router refuses it** (protected network) and the run completes with a visible FAILED action |
+| Vendor-dependency CVE | supply-chain review, code scan | supply-chain, code-scan | four CVEs land on an archived package **exactly four hops** below three organisations; the map draws the path; approve a tracking issue and a draft PR (never merged) whose diff digest matches the approval |
+| Malicious open-source package | supply-chain review, incident | all but code-scan | the exfiltration payload carries a note telling "AI security scanners" not to escalate; it is flagged, forced to escalate, rendered as inert text; approve isolating ci-runner-03 and the remediation issue |
+
+### Deviation from the PRD, deliberately
+
+**No Next.js, no npm, no bundler.** PRD §5.6 names Next.js + React + Tailwind +
+d3-force. The front end is ES modules served by the API itself, and the force layout
+([force.js](../src/sentinel/dashboard/static/js/force.js)) re-implements d3-force v3's
+semantics — alpha cooling, velocity decay, degree-biased link springs, many-body,
+collide, centre — in ~200 lines. The reason is the one behind NumPy-not-PyTorch: the
+whole repository still runs offline in one command, and a front end that needs an npm
+install breaks that. The trade is paid down by tests: the layout is deterministic,
+and `node --test` checks it is finite, centred, collision-free and pulls linked nodes
+together. A swap to the real library is mechanical.
+
+### The design decision that matters most: the approver is the token, never the body
+
+A decision body is `{action_id, approved, note}` with `extra="forbid"`; the approver
+recorded in the chain is the authenticated principal. A client cannot approve as
+someone else (422), a viewer cannot decide (403), and `action_id` must match the run's
+*current* interrupt or the decision is refused (409) — an approval is for what was
+reviewed, the rule the code-scan graph already applied to a diff. Another tenant's
+incident returns the same 404, with the same body, as an id that does not exist.
+
+### Findings during Part 5 — each changed the design
+
+1. **The supply-chain GNN cannot score a subgraph.** An advisory-scoped review
+   (everything one package reaches) failed with `SageLayer is full-graph`: the
+   aggregation matrix is fixed to the 500-node training graph. `top_risk_explanations`
+   and `SupplyChainAgent.assess` now accept precomputed `shares=`
+   ([`neighbourhood_shares`](../src/sentinel/graph/explain.py)) computed once on the
+   whole graph and restricted, so scoping changes which nodes are shown, never what any
+   of them scores or what the model keyed on.
+2. **Organisations bury the advisory they are about.** In the malicious-package scope
+   the package itself ranked **36th of 49** — organisations saturate the ranking (Part 2
+   finding 11) — so the review proposed notifying an organisation instead of acting on
+   the package. `include=` explains named nodes whatever their rank; a finding's `rank`
+   is now its true position in the score order.
+3. **On the whole graph, the fourth-order path is crowded out.** Clicking an
+   organisation on the CVE map showed five paths from *nearer* risk sources and none
+   from the advisory's package — correct as a ranking, useless for the review. Node
+   explanations are computed inside the advisory's scope when one is selected, with the
+   whole graph's scores and attributions.
+4. **The explainer double-counted parallel edges (a Part 2 bug).** 67 vendor →
+   organisation pairs carry both an API and a contractual edge; `_enumerate_paths`
+   walked each, so the same node sequence appeared twice in the UI and its
+   contribution was counted twice in `total_inherited_contribution`, which feeds the
+   attribution-disagreement flag. Predecessors are now de-duplicated, with a regression
+   test over every doubled pair.
+5. **An empty audit chain is reported as broken, on purpose — and a fresh dashboard
+   showed "chain BROKEN".** Part 1 flags an empty log because truncation to nothing is
+   the cheapest erasure. The dashboard now reports *empty* only when its own registry
+   agrees nothing has run; an empty log in a workspace that has runs is still broken.
+6. **Infiltration is too rare to hand-pick.** At 12,000 flows the held-out split has
+   one escalated infiltration flow and the scenarios need two; at 20,000 it has none —
+   the model monitors them. Flows are chosen by running the real Triage Agent on the
+   *scripted* alert, and scenario 3's attacker note is part of what triage judges: the
+   flow is escalated *because* it tried to talk the scanner out of escalating.
+7. **FastAPI silently turned auth dependencies into query parameters.** With
+   `from __future__ import annotations`, the locally defined `Annotated` aliases could
+   not be resolved and every route answered 422 "Field required". Caught in the first
+   browser sign-in; the module no longer postpones annotations and says why.
+8. **A 4-second auto-refresh replaced buttons under the cursor.** Found when clicks in
+   the browser walkthrough hit stale elements — a human would get the same race. A
+   background refresh now leaves the DOM alone when nothing changed, and never redraws
+   while the pointer is over the content or a control has focus.
+9. **A redeployed dashboard kept running last deploy's JavaScript.** Static assets are
+   now served `no-cache` (revalidated by ETag); API responses are `no-store`.
+
+### Honest caveats for Part 5
+
+- **The scenarios re-address generated flows.** The feature vectors are the held-out
+  flows the model has never seen, unchanged; the story's IP addresses and timestamps
+  are scripted. The phishing click itself is not observed — network telemetry cannot
+  see it, and the scenario says so rather than inventing a sensor.
+- **The malicious-package advisory is an approximation.** The GNN's feature space has
+  no "malicious" column; the advisory is mapped onto CVE exposure and breach history
+  (the `event-stream` shape). A real column needs retraining — Phase 2.
+- **Emulator state is in memory.** Runs, the audit chain, checkpoints and the journal
+  survive a restart (tested, including a crash between the wire and the checkpoint);
+  the local Wazuh/GitHub emulators do not, as a real remote system would.
+- **Tokens, not SSO.** PRD §4.1 puts SSO/SAML out of scope; tokens are generated per
+  run or read from `SENTINEL_DASHBOARD_TOKENS`. There is no token expiry or rotation.
+- **No browser test automation in CI.** The front end's logic is unit-tested under
+  Node and every route under pytest; the rendered UI was verified by hand in a browser
+  this session, not by a headless test.
+- **The F-11 50k-row timing test is contention-sensitive.** Under `pytest -n 4` it took
+  2.6 s in the final full run; alone it passes well under 1 s. Part 5 does not touch the
+  audit log, and the budget is recorded rather than loosened (see Part 1 finding 4).
+- **Still no LLM call, still no real external service**, as in Part 4.
 
 ---
 
@@ -1114,7 +1231,7 @@ python -m ruff check src tests scripts
 
 # Every acceptance gate this repo measures. Exits non-zero if any fails.
 python scripts/evaluate.py --n 20000 --cross-dataset --graph --kb --policy \
-    --agents --codescan --supplychain --connectors
+    --agents --codescan --supplychain --connectors --dashboard
 
 # Or one layer at a time:
 python scripts/evaluate.py --n 20000 --cross-dataset   # F-01, F-03
@@ -1125,6 +1242,7 @@ python scripts/evaluate.py --agents                    # F-02, F-04, F-05, F-08,
 python scripts/evaluate.py --codescan                  # F-07, and F-08 on graph 2
 python scripts/evaluate.py --supplychain               # F-06's guardrail, F-08 on graph 3
 python scripts/evaluate.py --connectors                # Part 4: Section 5.7, F-08 on the wire
+python scripts/evaluate.py --dashboard                 # Part 5: F-10 over HTTP
 python scripts/evaluate.py --augment                   # §5.5.5
 python scripts/evaluate.py --n 20000 --shallow         # the Part 1 linear baseline
 ```

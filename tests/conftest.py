@@ -136,3 +136,16 @@ def minimal_alert_kwargs() -> dict:
         "asset_id": "host-1",
         "raw_payload": "connection from 10.0.0.5",
     }
+
+
+@pytest.fixture(scope="session")
+def mesh_models():
+    """Part 5: the dashboard's trained models, built once per test session (per worker).
+
+    Built through :meth:`MeshModels.build` — the same path ``python -m
+    sentinel.dashboard`` takes — so the scenario flows the tests drive are the ones
+    the live demo shows.
+    """
+    from sentinel.dashboard.workspace import MeshModels
+
+    return MeshModels.build()

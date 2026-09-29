@@ -1902,6 +1902,271 @@ def run_connectors(*, n: int, seed: int, incidents: int) -> dict[str, Any]:
     }
 
 
+def run_dashboard(*, seed: int, n: int, evaluation: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate the Analyst Copilot (Part 5: PRD F-10, Figure 2 Layer 6).
+
+    F-10's criterion is *"all 3 demo scenarios completable end-to-end from this UI
+    alone"*. The UI is a static page whose every action is an HTTP call, so this
+    starts the real app under uvicorn on a loopback port and drives it with nothing
+    but ``urllib`` and bearer tokens: launch each scenario, read the approval queue,
+    post the decisions a human would, and read the outcome back from ``/api/wire``,
+    ``/api/overview`` and ``/api/audit``. No workspace method is called directly.
+
+    Five gates:
+
+    *   ``f10_scenarios_pass`` — all three scenarios complete (every run terminal, no
+        run failed), the queue empties, all seven gated decisions were made over
+        HTTP, and the remote systems hold exactly what was approved.
+    *   ``f10_guardrails_visible_pass`` — Part 4's two dashboard requirements: the
+        FAILED action inside a completed run and the router's refusal are both
+        returned, with the protected-network reason.
+    *   ``f10_boundary_pass`` — every route refuses a missing or wrong token, a viewer
+        cannot decide, a body naming its own approver is rejected, and another
+        tenant's incident is indistinguishable from a nonexistent one.
+    *   ``f08_dashboard_pass`` — zero ungated executions read back from the chain, the
+        chain verifies, and every approval row names the token's principal.
+    *   ``f12_same_pipeline_pass`` — the evaluation report the dashboard serves has
+        exactly the gates this run computed (Section 9.3: one pipeline).
+    """
+    import tempfile
+    import threading
+    import time as _time
+    import urllib.error
+    import urllib.request
+    from datetime import UTC, datetime
+    from pathlib import Path as _Path
+
+    import uvicorn
+
+    from sentinel.core.clock import SimulationClock
+    from sentinel.dashboard.app import create_app
+    from sentinel.dashboard.auth import Identity, Role, TokenRegistry
+    from sentinel.dashboard.views import evaluation_view
+    from sentinel.dashboard.workspace import MeshModels, Workspace
+
+    print()
+    print("=" * 72)
+    print("Layer 6 - Analyst Copilot dashboard (Part 5: F-10, over HTTP)")
+    print("=" * 72)
+
+    started = _time.perf_counter()
+    models = MeshModels.build(seed=seed, n_alerts=n)
+    build_seconds = _time.perf_counter() - started
+    work = _Path(tempfile.mkdtemp(prefix="sentinel-dashboard-eval-"))
+    snapshot = work / "evaluation.json"
+    snapshot.write_text(json.dumps(evaluation, indent=2, sort_keys=True), encoding="utf-8")
+    clock = SimulationClock(datetime(2026, 9, 29, 9, 0, 0, tzinfo=UTC))
+    workspaces = {
+        tenant: Workspace(models, tenant_id=tenant, workdir=work / tenant, clock=clock)
+        for tenant in ("acme", "globex")
+    }
+    maya = Identity("maya@acme.example", "acme", Role.ANALYST)
+    tokens, issued = TokenRegistry.generate(
+        [maya, Identity("auditor@acme.example", "acme", Role.VIEWER),
+         Identity("ops@globex.example", "globex", Role.ANALYST)]
+    )
+    analyst = issued["maya@acme.example@acme"]
+    viewer = issued["auditor@acme.example@acme"]
+    other_tenant = issued["ops@globex.example@globex"]
+
+    config = uvicorn.Config(create_app(workspaces, tokens, evaluation_path=snapshot),
+                            host="127.0.0.1", port=0, log_level="warning")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = _time.monotonic() + 30
+    while not server.started and _time.monotonic() < deadline:
+        _time.sleep(0.02)
+    if not server.started:
+        raise RuntimeError("the dashboard server did not start within 30 s")
+    port = server.servers[0].sockets[0].getsockname()[1]
+    base = f"http://127.0.0.1:{port}"
+
+    def call(method: str, path: str, token: str | None = None,
+             body: dict[str, Any] | None = None) -> tuple[int, Any]:
+        data = None if body is None else json.dumps(body).encode()
+        request = urllib.request.Request(base + path, data=data, method=method)
+        if token is not None:
+            request.add_header("Authorization", f"Bearer {token}")
+        if data is not None:
+            request.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                return response.status, json.loads(response.read() or b"null")
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read() or b"null")
+
+    try:
+        # --- the boundary, before anything exists ------------------------------------
+        probes: list[bool] = []
+        for path in ("/api/session", "/api/overview", "/api/queue", "/api/incidents",
+                     "/api/wire", "/api/audit", "/api/evaluation", "/api/code-scan",
+                     "/api/supply-chain/graph"):
+            probes.append(call("GET", path)[0] == 401)
+            probes.append(call("GET", path, "not-a-real-token-" + "x" * 20)[0] == 401)
+
+        # --- the three scenarios, from the API alone -----------------------------------
+        scenario_started = _time.perf_counter()
+        opened: dict[str, list[str]] = {}
+        for name in ("phishing-lateral", "vendor-cve", "malicious-package"):
+            status, body = call("POST", f"/api/scenarios/{name}/launch", analyst)
+            opened[name] = body["incidents"] if status == 200 else []
+        first_queue = call("GET", "/api/queue", analyst)[1]
+
+        # Boundary probes that need a live gate.
+        target = first_queue[0]
+        gate = f"/api/incidents/{target['incident_id']}/decision"
+        pending_id = target["pending_action"]["action_id"]
+        probes.append(call("POST", gate, viewer,
+                           {"action_id": pending_id, "approved": True})[0] == 403)
+        probes.append(call("POST", gate, analyst,
+                           {"action_id": pending_id, "approved": True,
+                            "approver": "ciso@acme.example"})[0] == 422)
+        foreign = call("GET", f"/api/incidents/{target['incident_id']}", other_tenant)
+        missing = call("GET", "/api/incidents/does-not-exist", other_tenant)
+        probes.append(foreign[0] == missing[0] == 404
+                      and foreign[1]["error"] == missing[1]["error"])
+        probes.append(call("POST", gate, other_tenant,
+                           {"action_id": pending_id, "approved": True})[0] == 404)
+
+        decisions = 0
+        rejected = 0
+        while True:
+            queue = call("GET", "/api/queue", analyst)[1]
+            if not queue:
+                break
+            item = queue[0]
+            action = item["pending_action"]
+            # The walkthrough: the discovery-sweep block of the already isolated
+            # workstation is redundant, so the analyst rejects it.
+            approve = not (action["action_type"] == "block_ip"
+                           and action["target"] == "10.20.4.17")
+            clock.advance(20.0)  # the analyst reads the evidence
+            status, _ = call("POST", f"/api/incidents/{item['incident_id']}/decision",
+                             analyst, {"action_id": action["action_id"], "approved": approve,
+                                       "note": "evaluate.py --dashboard"})
+            if status != 200:
+                break
+            decisions += 1
+            rejected += not approve
+        scenario_seconds = _time.perf_counter() - scenario_started
+
+        scenarios = call("GET", "/api/scenarios", analyst)[1]
+        wire = call("GET", "/api/wire", analyst)[1]
+        overview = call("GET", "/api/overview", analyst)[1]
+        verify = call("GET", "/api/audit/verify", analyst)[1]
+        audit = call("GET", "/api/audit?limit=500", analyst)[1]
+        served_report = call("GET", "/api/evaluation", analyst)[1]
+        globex_audit = call("GET", "/api/audit", other_tenant)[1]
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+        for workspace in workspaces.values():
+            workspace.close()
+
+    complete = [s["name"] for s in scenarios if s["complete"] and not s["failed_runs"]]
+    approvals = [r for r in audit["items"]
+                 if r["event_type"] in ("approval_granted", "approval_denied")]
+    approvers = sorted({r["payload"]["approver"] for r in approvals})
+    refusal_reasons = [r["reason"] for r in wire["refusals"]]
+    failed = wire["failed_actions"]
+    remote = wire["remote"]
+
+    scenarios_pass = (
+        len(complete) == 3 and decisions == 7 and rejected == 1
+        and overview["queue"] == 0 and overview["stalled"] == 0
+        and all(opened.values())
+        and remote["wazuh"]["isolated_hosts"] == ["10.20.4.17", "10.20.8.30"]
+        and remote["wazuh"]["blocked_addresses"] == []
+        and len(remote["github"]["issues"]) == 2
+        and [p["draft"] for p in remote["github"]["pulls"]] == [True]
+        and remote["github"]["merges"] == 0
+    )
+    guardrails_pass = (
+        len(failed) == 1 and failed[0]["target"] == "10.20.0.5"
+        and bool(failed[0]["failure_reason"])
+        and len(refusal_reasons) == 1 and "10.20.0.0/28" in refusal_reasons[0]
+        and overview["failed_actions"] == 1 and overview["refusals"] == 1
+    )
+    boundary_pass = all(probes) and globex_audit["total"] == 0
+    f08_pass = (
+        verify["ok"] and verify["ungated_executions"] == [] and len(approvals) == 7
+        and approvers == [maya.principal]
+    )
+    expected_gates = evaluation_view(snapshot)["gates"]
+    same_pipeline_pass = (
+        served_report["available"] and served_report["gates"] == expected_gates
+        and len(expected_gates) > 0
+    )
+    mttd = overview["mttd_seconds"]
+    mttc = overview["mttc_seconds"]
+    failed_pairs = [(f["action_type"], f["target"]) for f in failed]
+
+    print()
+    print(f"[models] built in {build_seconds:.1f}s from {n} flows; server on {base}")
+    print(f"[scenarios over HTTP] {len(complete)}/3 complete in {scenario_seconds:.2f}s "
+          f"wall · {decisions} decisions ({rejected} rejected)")
+    for scenario in scenarios:
+        state = "complete" if scenario["complete"] else "NOT complete"
+        print(f"  {scenario['name']:<18} {scenario['finished']}/{scenario['total']} runs "
+              f"finished · {scenario['decisions']} decision(s) · "
+              f"{scenario['failed_actions']} failed action(s) · {state}")
+    print(f"  Wazuh isolated {remote['wazuh']['isolated_hosts']} · blocked "
+          f"{remote['wazuh']['blocked_addresses']} · GitHub issues "
+          f"{len(remote['github']['issues'])} · draft PRs {len(remote['github']['pulls'])} "
+          f"· merges {remote['github']['merges']}")
+    print(f"  scenarios              {'PASS' if scenarios_pass else 'FAIL'}")
+    print()
+    print("[Part 4 requirements, as the dashboard shows them]")
+    print(f"  failed action in a completed run  {failed_pairs}")
+    first_reason = refusal_reasons[0][:100] if refusal_reasons else None
+    print(f"  router refusal reason             {first_reason}")
+    print(f"  guardrails visible     {'PASS' if guardrails_pass else 'FAIL'}")
+    print()
+    print(f"[boundary] {sum(probes)}/{len(probes)} probes refused as required "
+          "(401 without a token, 403 viewer, 422 forged approver, 404 cross-tenant)")
+    print(f"  boundary               {'PASS' if boundary_pass else 'FAIL'}")
+    print()
+    chain_state = "verified" if verify["ok"] else "BROKEN"
+    print(f"[F-08 through the dashboard] ungated {len(verify['ungated_executions'])} · chain "
+          f"{chain_state} ({verify['rows']} rows) · {len(approvals)} decisions, by {approvers}")
+    print(f"  F-08 dashboard         {'PASS' if f08_pass else 'FAIL'}")
+    print(f"[F-12] dashboard serves {len(served_report['gates'])} gates, identical to this "
+          f"run's: {'PASS' if same_pipeline_pass else 'FAIL'}")
+    print(f"[Section 9.1 as the dashboard reports it] MTTD {mttd:.3f}s · MTTC {mttc:.1f}s "
+          "(MTTC includes the simulated 20 s analyst read)")
+
+    return {
+        "models_build_seconds": build_seconds,
+        "scenario_wall_seconds": scenario_seconds,
+        "scenarios_complete": complete,
+        "decisions": decisions,
+        "rejected": rejected,
+        "isolated_hosts": remote["wazuh"]["isolated_hosts"],
+        "blocked_addresses": remote["wazuh"]["blocked_addresses"],
+        "github_issues": len(remote["github"]["issues"]),
+        "draft_prs": len(remote["github"]["pulls"]),
+        "merges": remote["github"]["merges"],
+        "failed_actions": [[f["action_type"], f["target"], f["failure_reason"]]
+                           for f in failed],
+        "refusal_reasons": refusal_reasons,
+        "boundary_probes": len(probes),
+        "boundary_refused": sum(probes),
+        "audit_rows": verify["rows"],
+        "ungated_executions": verify["ungated_executions"],
+        "approvals": len(approvals),
+        "approvers": approvers,
+        "mttd_seconds": mttd,
+        "mttc_seconds": mttc,
+        "served_gates": len(served_report["gates"]),
+        "f10_scenarios_pass": scenarios_pass,
+        "f10_guardrails_visible_pass": guardrails_pass,
+        "f10_boundary_pass": boundary_pass,
+        "f08_dashboard_pass": f08_pass,
+        "f12_same_pipeline_pass": same_pipeline_pass,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Sentinel Mesh offline evaluation")
     parser.add_argument("--n", type=int, default=20000, help="alerts to generate")
@@ -1992,6 +2257,18 @@ def main() -> int:
         default=300,
         help="incidents to drive through the real connectors for --connectors",
     )
+    parser.add_argument(
+        "--dashboard",
+        action="store_true",
+        help="serve the Analyst Copilot on a loopback port and complete all three demo "
+        "scenarios over HTTP alone (Part 5: F-10)",
+    )
+    parser.add_argument(
+        "--dashboard-alerts",
+        type=int,
+        default=12000,
+        help="flows to generate for the dashboard's models (the dashboard's default)",
+    )
     parser.add_argument("--out", type=Path, default=Path("data/artifacts/evaluation.json"))
     args = parser.parse_args()
 
@@ -2026,6 +2303,12 @@ def main() -> int:
     if args.connectors:
         result["connectors"] = run_connectors(
             n=args.connector_alerts, seed=args.seed, incidents=args.connector_incidents
+        )
+
+    if args.dashboard:
+        # Last, so the report the dashboard serves is this run's own (Section 9.3).
+        result["dashboard"] = run_dashboard(
+            seed=args.seed, n=args.dashboard_alerts, evaluation=result
         )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -2089,6 +2372,18 @@ def main() -> int:
                 "state_agreement_pass",
                 "draft_only_pass",
                 "exactly_once_pass",
+            )
+        )
+    if args.dashboard:
+        dashboard = result["dashboard"]
+        passed = passed and all(
+            bool(dashboard[gate])
+            for gate in (
+                "f10_scenarios_pass",
+                "f10_guardrails_visible_pass",
+                "f10_boundary_pass",
+                "f08_dashboard_pass",
+                "f12_same_pipeline_pass",
             )
         )
     return 0 if passed else 1

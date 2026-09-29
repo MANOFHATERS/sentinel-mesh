@@ -36,6 +36,7 @@ graph — which is exactly the failure
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
@@ -51,6 +52,7 @@ __all__ = [
     "ExposurePath",
     "NodeExplanation",
     "explain_node",
+    "neighbourhood_shares",
     "top_risk_explanations",
 ]
 
@@ -217,6 +219,13 @@ def _enumerate_paths(
     reach the same node through overlapping routes, and a global visited set would
     silently report only the first one found — losing exactly the "you are exposed
     through several independent paths" finding that justifies a high score.
+
+    Predecessors are de-duplicated (Part 5, found in the dashboard). A vendor can
+    hold both an API and a contractual edge to one organisation — 67 pairs in the
+    synthetic graph do — and walking each edge reported the same node sequence
+    twice, with its contribution counted twice in
+    ``total_inherited_contribution``. A path is a sequence of nodes; its
+    contribution does not depend on edge kind, so two parallel edges are one path.
     """
     found: list[tuple[str, ...]] = []
     # Each frontier entry is a path written target-last, built up backwards.
@@ -224,7 +233,7 @@ def _enumerate_paths(
     for _ in range(max_hops):
         next_frontier: list[tuple[str, ...]] = []
         for path in frontier:
-            for predecessor in graph.sources_of(path[0]):
+            for predecessor in dict.fromkeys(graph.sources_of(path[0])):
                 if predecessor in path:
                     continue  # no cycles, and no revisiting within this path
                 extended = (predecessor, *path)
@@ -304,6 +313,21 @@ def _ablation_shares(model: SupplyChainGNN, graph: SupplyChainGraph) -> np.ndarr
     )
 
 
+def neighbourhood_shares(model: SupplyChainGNN, graph: SupplyChainGraph) -> np.ndarray:
+    """Public form of the ablation attribution, for one full-graph forward pass.
+
+    Part 5. :class:`~sentinel.graph.gnn.SageLayer` is full-graph: its aggregation
+    matrix is fixed to the graph it was fitted on, so the model cannot be re-run on
+    an induced subgraph. A caller that *scopes* a review (the dashboard's
+    advisory-driven review looks only at what one package reaches) therefore
+    computes the shares once on the whole graph and hands the restricted vector to
+    :func:`top_risk_explanations` as ``shares=``. The attribution then answers the
+    same question it answers everywhere else — what the model keyed on for this node
+    *in the real graph* — rather than a different one about a truncated graph.
+    """
+    return _ablation_shares(model, graph)
+
+
 # --------------------------------------------------------------------------- #
 # Public API
 # --------------------------------------------------------------------------- #
@@ -378,6 +402,8 @@ def top_risk_explanations(
     *,
     model: SupplyChainGNN | None = None,
     k: int = 10,
+    shares: np.ndarray | None = None,
+    include: Sequence[str] = (),
     **kwargs: Any,
 ) -> list[NodeExplanation]:
     """Explain the ``k`` highest-scoring nodes — the dashboard's review queue.
@@ -395,10 +421,32 @@ def top_risk_explanations(
     if k < 1:
         raise GraphError("k must be >= 1")
 
-    shares = (
-        _ablation_shares(model, graph) if model is not None else np.full(values.size, 0.5)
+    if shares is not None:
+        # Precomputed on a larger graph this one was cut from (see
+        # neighbourhood_shares). Validated like the scores: a misaligned vector
+        # would attribute one node's driver to another.
+        shares = np.asarray(shares, dtype=DTYPE).ravel()
+        if shares.size != graph.n_nodes:
+            raise GraphError(
+                f"shares ({shares.size}) do not match node count ({graph.n_nodes})"
+            )
+        if np.any((shares < 0.0) | (shares > 1.0)) or not np.all(np.isfinite(shares)):
+            raise GraphError("shares must be finite and within [0, 1]")
+    elif model is not None:
+        shares = _ablation_shares(model, graph)
+    else:
+        shares = np.full(values.size, 0.5)
+    ranking = [int(i) for i in np.argsort(-values, kind="stable")[: min(k, values.size)]]
+    # ``include`` (Part 5): nodes explained whatever their rank, appended after the
+    # top k in score order. An advisory-driven review is *about* one package, and
+    # organisations saturate the ranking (Part 2 finding 11), so the subject of the
+    # review can rank 36th in its own scope; leaving it out would make the review
+    # explain everything except the thing it was opened for.
+    extra = sorted(
+        {graph.index_of(node_id) for node_id in include} - set(ranking),
+        key=lambda i: (-values[i], i),
     )
-    ranking = np.argsort(-values, kind="stable")[: min(k, values.size)]
+    ranking.extend(extra)
 
     explanations: list[NodeExplanation] = []
     for index in ranking:
