@@ -558,10 +558,18 @@ class TriageAgent:
         decided_at = now or self.clock.now()
         started = self.clock.monotonic()
         assessments = self.model.assess_batch(alerts)
-        return tuple(
+        results = tuple(
             self._deterministic(alert, assessment, decided_at=decided_at, started=started)
             for alert, assessment in zip(alerts, assessments, strict=True)
         )
+        # Amortised, not cumulative. Every alert in the batch was scored by one
+        # vectorised call, so sharing a start instant would charge the last alert
+        # with the whole batch's time and report a per-alert latency that grows
+        # with batch size — which is how a 0.2 ms operation comes to look like
+        # 1.3 s against F-02's five-second budget.
+        elapsed = self._elapsed_ms(started)
+        per_alert = elapsed / max(1, len(results))
+        return tuple(result.updated(latency_ms=per_alert) for result in results)
 
     # --- internals ------------------------------------------------------------ #
 

@@ -69,6 +69,51 @@ class FrozenClock:
         return self._now
 
 
+class SimulationClock:
+    """Real elapsed time on a chosen origin, plus explicit jumps.
+
+    The clock the offline evaluation needs, and neither of the other two is it.
+
+    :class:`SystemClock` gives real durations but no way to simulate the analyst
+    who takes twelve seconds to click approve, so PRD Section 9.1's MTTC — which
+    is defined to *include* that click — cannot be measured with it.
+    :class:`FrozenClock` can inject the click but reports every node as taking
+    zero seconds, so MTTD comes out as 0.00s and its 30-second budget passes
+    without measuring anything. A gate that cannot fail is not a gate.
+
+    This clock advances by genuine monotonic time as work happens, so node
+    durations are real, and :meth:`advance` adds a simulated interval on top for
+    the parts of the timeline a human occupies. The origin is fixed, so a replay
+    of a historical corpus can still be stamped on its own timeline.
+    """
+
+    __slots__ = ("_origin", "_skew", "_start_mono")
+
+    def __init__(self, start: datetime | None = None) -> None:
+        base = start if start is not None else datetime(2026, 1, 1, tzinfo=UTC)
+        if base.tzinfo is None:
+            raise ValueError("SimulationClock requires a timezone-aware start datetime")
+        self._origin = base.astimezone(UTC)
+        self._start_mono = time.monotonic()
+        self._skew = 0.0
+
+    def _elapsed(self) -> float:
+        return (time.monotonic() - self._start_mono) + self._skew
+
+    def now(self) -> datetime:
+        return self._origin + timedelta(seconds=self._elapsed())
+
+    def monotonic(self) -> float:
+        return self._elapsed()
+
+    def advance(self, seconds: float = 1.0) -> datetime:
+        """Add a simulated interval — a human's thinking time, or a feed gap."""
+        if seconds < 0:
+            raise ValueError("SimulationClock cannot move backwards")
+        self._skew += seconds
+        return self.now()
+
+
 def to_utc(value: datetime) -> datetime:
     """Normalize any datetime to timezone-aware UTC.
 

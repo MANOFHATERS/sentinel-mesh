@@ -1,4 +1,4 @@
-# Architecture Notes — Part 1
+# Architecture Notes
 
 PRD Section 5 specifies the six-layer architecture. This document records the
 implementation decisions inside those layers: what was chosen, what the obvious
@@ -19,8 +19,19 @@ considered.
 └──────────────────────────────┬───────────────────────────────────────┘
 ┌─ Layer 3 · Intelligence ─────▼───────────────────────────────────────┐
 │  ml.featurestore     one FeatureSpec, fingerprinted, train==serve     │
-│  ml.anomaly          IsolationForest + PCA reconstruction, calibrated │
-│  ml.metrics          leakage-refusing split, per-family reporting     │
+│  ml.anomaly/deep     IsolationForest + denoising AE, calibrated       │
+│  ml.classify         supervised family classifier (F-02)              │
+│  ml.robustness       calibration probe + novelty gate                 │
+│  graph               supply-chain GraphSAGE + path explainer          │
+│  kb                  ATT&CK/CVE corpus, BM25+TF-IDF+LSA, citations    │
+│  rl                  trust-tier mask, shaped reward, Thompson bandit  │
+│  ml.metrics          leakage-refusing splits, per-family reporting    │
+└──────────────────────────────┬───────────────────────────────────────┘
+┌─ Layer 4 · Orchestration ────▼───────────────────────────────────────┐
+│  agents.runtime      checkpointed state machine, interrupt + resume   │
+│  agents.engine       ReasoningEngine seam + monotone_caution          │
+│  agents.triage       F-02 · investigate F-05 · contain F-08           │
+│  agents.orchestrator PRD Figure 3, with the gate as its own node      │
 └──────────────────────────────┬───────────────────────────────────────┘
 ┌─ Layer 6 · Oversight ────────▼───────────────────────────────────────┐
 │  audit.log           SHA-256/HMAC chain, DB-enforced append-only      │
@@ -309,8 +320,66 @@ column sits outside the hash, so adding a column without protecting it fails the
 
 ---
 
-## What Part 1 does not do
+## Layer 4 — orchestration and agents
 
-No LLM calls, no agents, no orchestrator, no supply-chain graph, no dashboard. Those are
-Parts 2–5 and are scoped in [BUILD_PLAN.md](BUILD_PLAN.md). The foundation was built first
-specifically so the agent layer inherits its guardrails rather than reimplementing them.
+Added in Part 3. The full rationale, with measurements, is in
+[BUILD_PLAN.md](BUILD_PLAN.md); three structural points belong here because they are
+architecture rather than implementation.
+
+### The state is a contract, not a dict
+
+Every orchestration framework models workflow state as a mutable mapping.
+`IncidentState` is a frozen pydantic contract instead, for one reason that is specific
+to this system: the state carries approval status, so a checkpoint store that
+round-trips through an opaque binary format without a verifiable hash is an
+approval-forgery path. Being a contract gives the state canonical bytes, a hash that
+`Checkpointer.get` recomputes on read, and re-validation on load — so a checkpoint
+edited in the store is *refused* rather than resumed. Checkpoints are themselves
+chained, so deleting the intermediate one that recorded a denied approval breaks the
+chain. It is the same tamper-evidence construction as the audit log, deliberately:
+there is one such idea in this system, not two.
+
+It also preserves a type. `Alert.raw_payload` is an `UntrustedText`; a checkpointer that
+serialises it to `str` and restores it as `str` has silently deleted the control that
+stops it being interpolated into a prompt. Restoring through the schema's own validator
+keeps the property by construction, and a test asserts it across a real file.
+
+### The reasoning engine is a seam, not a dependency
+
+`ReasoningEngine` has one method: one prompt in, one parsed response out. An engine
+cannot call tools, cannot reach the audit log, and cannot see the state. Everything with
+real-world consequence happens in Python, where it is reviewable. The default is
+`NullEngine`, and every Part 3 acceptance criterion passes with it — which is what makes
+`monotone_caution`'s bound honest, because the baseline it protects is a working system
+rather than an empty one.
+
+An engine's output is typed `UntrustedText`. This is not decoration: the model read
+attacker-controlled bytes, so its output is a function of attacker-controlled bytes, and
+treating it as trusted because "it came from our model" is exactly the laundering step
+that makes second-order injection work.
+
+### The approval gate is a node, not a flag
+
+`interrupt_before` is static per node, and the gate therefore gets its own node. That
+makes "this incident is waiting for a human" a *position in the graph* — visible in the
+checkpoint, in the pending queue, and in the audit log — rather than a boolean somebody
+has to remember to check. The alternative, one execution node that sometimes pauses,
+puts the decision of whether to pause inside the node that does the acting, which is the
+one place it must not be. A rejected action ends the run without the connector ever
+being called.
+
+F-08 is then enforced in four independent places — the schema, the action mask, the
+graph, and the audit log — and checked by `verify_no_ungated_execution`, which reads the
+log rather than the objects that enforce the rule. Asking those objects whether the rule
+held would be circular.
+
+---
+
+## What is still not built
+
+No Code-Scan/Patch agent (F-07), no Supply-Chain agent node, no real connector layer,
+no dashboard (F-10). Those are Parts 3.3–5 and are scoped in
+[BUILD_PLAN.md](BUILD_PLAN.md). The foundation was built first specifically so the agent
+layer inherits its guardrails rather than reimplementing them — and Part 3 is the
+evidence that worked: `ActionRequest` and `TriageResult` needed no changes to hold the
+agents to F-08 and Appendix A.
