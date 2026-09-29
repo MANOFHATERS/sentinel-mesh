@@ -92,6 +92,13 @@ from sentinel.core.clock import Clock, SystemClock
 from sentinel.core.errors import SentinelError
 from sentinel.core.ids import deterministic_id
 from sentinel.core.schemas import Alert, ApprovalStatus, AuditEventType
+from sentinel.dashboard.lab import (
+    DiffusionStudy,
+    PolicyTraining,
+    ServingPolicy,
+    graph_evaluation,
+    train_response_policy,
+)
 from sentinel.dashboard.scenarios import (
     ASSET_INVENTORY,
     PROTECTED_NETWORKS,
@@ -187,6 +194,15 @@ class MeshModels:
     feed: tuple[Alert, ...]
     cve_package: str
     malicious_package: str
+    #: Part 5.1: the Section 5.5.4 response policy, trained at start-up and served
+    #: greedily to every workspace's Containment Agent.
+    policy: ServingPolicy
+    policy_training: PolicyTraining
+    #: F-06 on this process's own test split, next to a features-only baseline.
+    graph_evaluation: dict[str, Any]
+    #: Section 5.5.5, run on a background thread once :meth:`start_background` is
+    #: called (the dashboard does; tests that do not need it never pay for it).
+    diffusion: DiffusionStudy
 
     @classmethod
     def build(cls, *, seed: int = DEFAULT_SEED, n_alerts: int = DEFAULT_ALERTS) -> MeshModels:
@@ -217,12 +233,14 @@ class MeshModels:
         graph, truth = SyntheticGraphGenerator(seed=seed).generate()
         node_ids = graph.node_ids()
         node_labels = truth.labels(node_ids)
+        graph_split = GraphSplit.stratified(node_labels, seed=seed)
         gnn = SupplyChainGNN(random_state=seed).fit(
             graph,
             node_labels,
-            GraphSplit.stratified(node_labels, seed=seed),
+            graph_split,
             exposure=truth.risk_vector(node_ids),
         )
+        bandit, policy_training = train_response_policy(seed=seed)
         cve_package = select_cve_package(graph)
         # Neither advisory's package may sit inside the other's reach, so the two
         # reviews stay about their own advisory whichever is launched first.
@@ -242,7 +260,16 @@ class MeshModels:
             feed=feed,
             cve_package=cve_package,
             malicious_package=malicious_package,
+            policy=ServingPolicy(bandit),
+            policy_training=policy_training,
+            graph_evaluation=graph_evaluation(graph, truth, gnn, graph_split),
+            diffusion=DiffusionStudy(seed=seed, n_alerts=n_alerts),
         )
+
+    def start_background(self) -> MeshModels:
+        """Start the slow studies (diffusion) that the Models page reports on."""
+        self.diffusion.start()
+        return self
 
     def advisory(self, kind: AdvisoryKind) -> Advisory:
         if kind is AdvisoryKind.CVE:
@@ -383,7 +410,9 @@ class Workspace:
         self.incident_graph = build_incident_graph(
             triage=TriageAgent(model=models.triage_model, clock=self.clock),
             investigation=InvestigationAgent(kb=models.kb, clock=self.clock),
-            containment=ContainmentAgent(clock=self.clock),
+            containment=ContainmentAgent(
+                clock=self.clock, policy=models.policy, triage_floor=True
+            ),
             connector=self._connector,
             checkpointer=self._stores.checkpoints,
         )

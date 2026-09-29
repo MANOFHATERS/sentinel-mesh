@@ -227,6 +227,7 @@ def _contain_node(agent: ContainmentAgent):
                     "response": proposal.response.value,
                     "tier": proposal.tier.value,
                     "action": None,
+                    "policy": proposal.policy_view(),
                 },
             )
             return state
@@ -245,6 +246,7 @@ def _contain_node(agent: ContainmentAgent):
                 "requires_human_approval": action.requires_human_approval,
                 "response": proposal.response.value,
                 "exploratory": proposal.exploratory,
+                "policy": proposal.policy_view(),
             },
         )
         if action.requires_human_approval:

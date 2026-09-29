@@ -113,6 +113,25 @@ class Proposal:
     tier: RiskTier
     exploratory: bool
     policy_confidence: float
+    #: What the learned policy itself chose, before any floor was applied. ``None``
+    #: when no policy is fitted and the response simply follows triage.
+    policy_choice: ResponseAction | None = None
+    #: True when the triage floor overrode a less attentive policy choice.
+    floored: bool = False
+    #: The policy's posterior-mean reward estimate per allowed option.
+    expected: dict[str, float] = field(default_factory=dict)
+
+    def policy_view(self) -> dict[str, object]:
+        """The policy's reasoning as plain data, for the audit row and the dashboard."""
+        return {
+            "fitted": self.policy_choice is not None,
+            "choice": None if self.policy_choice is None else self.policy_choice.value,
+            "response": self.response.value,
+            "confidence": round(float(self.policy_confidence), 6),
+            "exploratory": self.exploratory,
+            "floored": self.floored,
+            "expected": {k: round(float(v), 6) for k, v in self.expected.items()},
+        }
 
     @property
     def intervenes(self) -> bool:
@@ -165,6 +184,12 @@ class ContainmentAgent:
     #: The customer's current trust tier for this action class (Section 5.7).
     #: ``recommend`` is where every action type starts, by the PRD's own rule.
     default_tier: RiskTier = RiskTier.RECOMMEND
+    #: Part 5. When true, the policy may raise the level of attention above what
+    #: triage decided but never lower it: an alert triage escalated is escalated
+    #: whatever the policy prefers. The same monotone-caution rule the reasoning
+    #: engine is held to (see :mod:`sentinel.agents.engine`), applied to the learned
+    #: policy. Off by default so the offline F-09 replay measures the policy alone.
+    triage_floor: bool = False
     version: str = "containment-1"
 
     def propose(
@@ -187,7 +212,9 @@ class ContainmentAgent:
         created_at = now or self.clock.now()
         mask = ActionMask.for_tier(effective_tier)
 
-        response, exploratory, confidence = self._select(alert, triage, effective_tier)
+        response, exploratory, confidence, choice, floored, expected = self._select(
+            alert, triage, effective_tier
+        )
         # Asserted rather than trusted: this is the invariant the mask exists for,
         # and the assertion costs nothing on a path that runs once per incident.
         mask.require(response)
@@ -202,6 +229,9 @@ class ContainmentAgent:
                 tier=effective_tier,
                 exploratory=exploratory,
                 policy_confidence=confidence,
+                policy_choice=choice,
+                floored=floored,
+                expected=expected,
             )
 
         target = self._target(alert, action_type)
@@ -223,13 +253,17 @@ class ContainmentAgent:
             tier=effective_tier,
             exploratory=exploratory,
             policy_confidence=confidence,
+            policy_choice=choice,
+            floored=floored,
+            expected=expected,
         )
 
     # --- internals ------------------------------------------------------------ #
 
     def _select(
         self, alert: Alert, triage, tier: RiskTier
-    ) -> tuple[ResponseAction, bool, float]:
+    ) -> tuple[ResponseAction, bool, float, ResponseAction | None, bool, dict[str, float]]:
+        """``(response, exploratory, confidence, policy_choice, floored, expected)``."""
         score = float(triage.anomaly_score if triage.anomaly_score is not None else 0.5)
         if self.policy is None:
             # No policy fitted. Fall back to the triage decision, which is the
@@ -239,10 +273,27 @@ class ContainmentAgent:
             mask = ActionMask.for_tier(tier)
             if not mask.permits(fallback):
                 fallback = ResponseAction.ESCALATE
-            return fallback, False, triage.confidence
+            return fallback, False, triage.confidence, None, False, {}
         context = build_context(alert, anomaly_score=min(1.0, max(0.0, score)))
         decision = self.policy.select(np.asarray(context, dtype=float), tier=tier)
-        return decision.action, decision.was_exploratory, decision.confidence
+        expected = {a.value: float(v) for a, v in decision.expected_values.items()}
+        response = decision.action
+        floored = False
+        if self.triage_floor:
+            floor = _RESPONSE_FOR_DECISION[triage.decision]
+            if _ATTENTION[response] < _ATTENTION[floor] and ActionMask.for_tier(
+                tier
+            ).permits(floor):
+                response = floor
+                floored = True
+        return (
+            response,
+            decision.was_exploratory,
+            decision.confidence,
+            decision.action,
+            floored,
+            expected,
+        )
 
     def _action_type(
         self,
@@ -371,6 +422,16 @@ def _build_decision_map() -> None:
 
 
 _build_decision_map()
+
+#: How much human attention each response gets. Containing and escalating both put
+#: the alert in front of a human or act on it; monitoring records it; dismissing
+#: drops it. The triage floor compares on this, never on reward.
+_ATTENTION: Final[dict[ResponseAction, int]] = {
+    ResponseAction.AUTO_CONTAIN: 2,
+    ResponseAction.ESCALATE: 2,
+    ResponseAction.MONITOR: 1,
+    ResponseAction.DISMISS: 0,
+}
 
 
 # --------------------------------------------------------------------------- #

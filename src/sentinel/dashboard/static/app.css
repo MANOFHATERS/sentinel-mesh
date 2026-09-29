@@ -25,6 +25,10 @@
   --code-bg: #f1f3f7;
   --shadow: 0 1px 2px rgb(16 24 40 / 6%), 0 1px 3px rgb(16 24 40 / 8%);
   --radius: 10px;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --ref: #8b8f98;
+  --grid: #e6e8ee;
   --mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   color-scheme: light;
@@ -54,6 +58,10 @@
     --hot: #ff6b61;
     --edge: #444c59;
     --code-bg: #12161b;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --ref: #7d8494;
+    --grid: #262c35;
     --shadow: none;
     color-scheme: dark;
   }
@@ -82,6 +90,10 @@
   --hot: #ff6b61;
   --edge: #444c59;
   --code-bg: #12161b;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --ref: #7d8494;
+  --grid: #262c35;
   --shadow: none;
   color-scheme: dark;
 }
@@ -409,3 +421,55 @@ td details pre { max-width: 60ch; }
 }
 .login label { color: var(--muted); font-size: 0.9rem; }
 .login-status { min-height: 1.4em; margin: 0; color: var(--muted); }
+
+/* --- charts (Part 5.1) --------------------------------------------------------- */
+
+.chart { margin: 10px 0 0; }
+.chart figcaption { font-size: 0.92rem; margin-bottom: 4px; }
+.chart-holder { position: relative; }
+.chart-svg { width: 100%; height: auto; display: block; overflow: visible; }
+.chart-grid line { stroke: var(--grid); stroke-width: 1; }
+.chart-grid line.baseline { stroke: var(--ref); }
+.chart-grid .tick { fill: var(--muted); font-size: 11px; font-family: var(--sans); }
+.chart-grid .axis-label { fill: var(--muted); font-size: 11px; font-family: var(--sans); }
+.chart-svg .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.chart-svg .line.series-1 { stroke: var(--series-1); }
+.chart-svg .line.series-2 { stroke: var(--series-2); }
+.chart-svg .line.dashed { stroke-dasharray: 5 4; }
+.chart-svg .end-label { fill: var(--text); font-size: 11px; font-family: var(--sans); }
+.chart-svg .bar.series-1 { fill: var(--series-1); }
+.chart-svg .bar.series-2 { fill: var(--series-2); }
+.chart-svg .bar:focus { outline: none; stroke: var(--text); stroke-width: 2; }
+.chart-svg .crosshair { stroke: var(--ref); stroke-width: 1; stroke-dasharray: 3 3; }
+.chart-svg .dot { stroke: var(--surface); stroke-width: 2; }
+.chart-svg .dot.series-1 { fill: var(--series-1); }
+.chart-svg .dot.series-2 { fill: var(--series-2); }
+.chart-svg .hit { fill: transparent; cursor: crosshair; }
+.chart-legend { display: flex; gap: 14px; list-style: none; padding: 0; margin: 2px 0 4px; font-size: 0.84rem; color: var(--muted); }
+.chart-legend li { display: inline-flex; align-items: center; gap: 6px; }
+.key { display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+.key.series-1 { background: var(--series-1); }
+.key.series-2 { background: var(--series-2); }
+.chart-tip {
+  position: absolute;
+  pointer-events: none;
+  min-width: 150px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 0.82rem;
+  box-shadow: var(--shadow);
+  opacity: 0;
+  transition: opacity 80ms linear;
+}
+.chart-tip.visible { opacity: 1; }
+.chart-table summary { cursor: pointer; color: var(--muted); font-size: 0.84rem; margin-top: 4px; }
+tr.row-good td { background: var(--good-bg); }
+@media (forced-colors: active) {
+  .chart-svg .line, .chart-svg .bar { forced-color-adjust: auto; }
+}
+/* The crosshair and hover dots exist only while the pointer is over the plot. */
+.chart-svg .crosshair, .chart-svg .dot { visibility: hidden; }
+.chart-holder.hovering .crosshair, .chart-holder.hovering .dot { visibility: visible; }

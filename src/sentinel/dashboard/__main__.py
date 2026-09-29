@@ -44,6 +44,9 @@ def main(argv: list[str] | None = None) -> int:
     started = time.perf_counter()
     print(f"training models (seed {args.seed}, {args.alerts} flows)...", flush=True)
     models = MeshModels.build(seed=args.seed, n_alerts=args.alerts)
+    # The diffusion study trains in the background; the Models page fills in when
+    # it finishes (about half a minute on a laptop).
+    models.start_background()
     root = args.workdir or Path(tempfile.mkdtemp(prefix="sentinel-dashboard-"))
     workspaces = {
         tenant: Workspace(models, tenant_id=tenant, workdir=root / tenant) for tenant in tenants

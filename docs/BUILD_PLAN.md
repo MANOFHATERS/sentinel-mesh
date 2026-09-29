@@ -14,11 +14,13 @@ agents run on three checkpointed graphs that share one state machine, one Human 
 Gate and one audit chain; every approved action leaves the process through real HTTP
 connectors behind a least-privilege router; and since Part 5 an analyst drives all of
 it from the **Analyst Copilot dashboard** — all three demo scenarios complete end to end
-from the UI alone (F-10).
+from the UI alone (F-10). Part 5.1 put the response policy into the live incident
+flow (§5.5.4), added the F-12 alert-reduction chart and the §9.1 regret curve, and a
+Models page showing every model's training record.
 
 ```bash
 python scripts/evaluate.py --n 20000 --cross-dataset --graph --kb --policy \
-    --agents --codescan --supplychain --connectors --dashboard
+    --augment --agents --codescan --supplychain --connectors --dashboard
 python -m sentinel.dashboard      # the Analyst Copilot on http://127.0.0.1:8765/
 ```
 
@@ -1218,6 +1220,87 @@ incident returns the same 404, with the same body, as an id that does not exist.
   2.6 s in the final full run; alone it passes well under 1 s. Part 5 does not touch the
   audit log, and the budget is recorded rather than loosened (see Part 1 finding 4).
 - **Still no LLM call, still no real external service**, as in Part 4.
+
+## Part 5.1 — the response policy in the live flow, and the Models page ✅ COMPLETE
+
+A review of the PRD against the running dashboard found three things that were measured
+offline but absent from the live system. All three are closed:
+
+| PRD ref | Gap | Now |
+|---|---|---|
+| **§5.5.4** | The dashboard's Containment Agent ran with **no policy**; it followed triage. F-09's bandit existed only in `evaluate.py --policy`. | The bandit is trained at start-up (1,500 simulated incidents, under a second) and **decides every live incident**, served greedily, with a triage floor. Each incident shows the policy's choice, confidence and per-option expected reward, read back from the audit row. |
+| **F-12** | The report had alert reduction as numbers only; F-12 asks for an *"FP-reduction chart"*. | The Evaluation page draws it: share of alerts reaching a human, raw feed vs. after triage vs. a 1% attack rate. |
+| **§9.1** | Only the final regret ratio; §9.1 asks for the *"cumulative regret curve vs. an oracle policy"*. | `evaluate.py --policy` now records the mean curve over its seeds, and the Evaluation page draws it against the no-learning baseline. |
+
+And one demo addition beyond the PRD: a **Models** page showing what this server trained
+when it started — the autoencoder's loss curve, the GNN's loss curve and its top-10
+precision next to a features-only baseline, the bandit's learning curve, and a
+background diffusion study. It is labelled as live training records, not acceptance
+numbers, which stay on the Evaluation page (PRD §9.3: one pipeline).
+
+### Delivered
+
+| What | Where | Verified by |
+|---|---|---|
+| Policy training at start-up, greedy serving, GNN measurement, background diffusion study | [dashboard/lab.py](../src/sentinel/dashboard/lab.py) | `tests/unit/test_dashboard_lab.py` (12) |
+| Triage floor + the policy's reasoning on every proposal and audit row | [agents/contain.py](../src/sentinel/agents/contain.py), [agents/orchestrator.py](../src/sentinel/agents/orchestrator.py) | `test_dashboard_lab.py::TestTriageFloor`, `test_dashboard_api.py` |
+| `/api/models`, the policy on incident detail, chart data in the evaluation view | [dashboard/app.py](../src/sentinel/dashboard/app.py), [dashboard/views.py](../src/sentinel/dashboard/views.py) | `tests/integration/test_dashboard_api.py` |
+| Line and bar charts: hover crosshair/tooltips, legend, direct labels, table view, validated two-slot palette in both themes | [static/js/charts.js](../src/sentinel/dashboard/static/js/charts.js) | `tests/js/charts.test.mjs` (9) |
+| Regret curve in the F-12 artifact | [scripts/evaluate.py](../scripts/evaluate.py) | the Evaluation page draws it |
+
+### Measured (this server's start-up run, seed 20260928)
+
+```
+response policy   1,500 episodes, 0.5 s · optimal-action rate 0.737 · regret 0.111 of no-learning
+GNN               top-10 precision 0.90 on the 150-node test split · features-only 0.50
+autoencoder       80 epochs, 5,546 parameters · ensemble weights 0.50 / 0.50
+diffusion study   5 scarcity levels, ~6 s each, on a background thread
+```
+
+### The design decision that matters most: the triage floor
+
+A learned policy is allowed to add caution and never to remove it. If triage escalated,
+the incident is escalated whatever the policy prefers; if the policy prefers *more*
+attention than triage gave, that stands. This is the same monotone-caution rule the
+reasoning engine has been held to since Part 3, applied to the other learned component
+that can change what reaches a human. Both the policy's own choice and the floored
+response are recorded, so an auditor can see every time the floor fired.
+
+Off by default in `ContainmentAgent`, so the offline F-09 replay still measures the
+policy alone; the dashboard turns it on.
+
+### Findings during Part 5.1
+
+1. **The policy catches attacks triage only monitored.** Replaying 1,500 held-out flows
+   through the trained policy: every flow triage escalated stays escalated (43/43), and
+   of the flows triage only *monitored*, the policy escalates **292 attacks and 11 benign
+   flows** — 96% precision on what it adds. Before this part those 292 went to
+   enrichment with no human. The cost is a larger approval queue, and the live
+   alert-reduction figure falls accordingly; that is the policy doing its job, and it is
+   reported rather than tuned away.
+2. **The floor has not fired on this corpus.** The trained policy never tried to
+   downgrade an escalation. The floor is still there — tested against an adversarial
+   policy that always dismisses — because "the learned model happens to behave today" is
+   not a guarantee.
+3. **Diffusion augmentation does not help here, and the page says so.** Re-measured live:
+   roughly neutral with full data, and at 12 rare rows per family, mean rare-attack
+   recall falls from about 0.87 to 0.66. This matches Part 2's −0.167. The generator's
+   value on this project is the calibration probe (Part 2 finding 9), not recall.
+4. **A chart helper produced three ticks on a 0–1 axis.** Rounding the tick step *up* to
+   the next 1-2-5 value gave 0 / 0.5 / 1. Replaced with d3's rule (nearest step on a log
+   scale), caught by a unit test before it reached a page.
+
+### Honest caveats for Part 5.1
+
+- **No online learning.** The policy is trained once, at start-up, on the F-09
+  simulator; dashboard approvals do not update it. Learning from analyst decisions is
+  PRD Phase 3 work, and a feedback path that trained on whatever a demo operator
+  clicked would be worse than none.
+- **Greedy serving means no exploration in production.** Deliberate (an analyst's
+  incident is not the place to try an arm), and it means the policy only improves when
+  retrained.
+- **The Models page GNN number is one seed.** F-06 is asserted as a 10-seed mean by the
+  evaluation pipeline; the page says so next to the number.
 
 ---
 

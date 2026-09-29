@@ -45,6 +45,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from sentinel.dashboard import views
 from sentinel.dashboard.auth import AuthError, Identity, TokenRegistry
+from sentinel.dashboard.lab import model_report
 from sentinel.dashboard.scenarios import ASSET_INVENTORY, ScenarioName
 from sentinel.dashboard.workspace import Conflict, NotFound, Workspace, WorkspaceError
 
@@ -285,6 +286,12 @@ def create_app(
     @app.get("/api/evaluation")
     def evaluation_report(_who: Who) -> dict[str, Any]:
         return views.evaluation_view(evaluation)
+
+    @app.get("/api/models")
+    def models_report(ws: Ws) -> dict[str, Any]:
+        # Tenant-agnostic training records, but still behind the token: the page
+        # says what this deployment trained, which is not public information.
+        return model_report(ws.models, policy=ws.models.policy)
 
     # --- the page ------------------------------------------------------------------ #
 

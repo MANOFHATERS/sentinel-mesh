@@ -307,10 +307,26 @@ def incident_detail(workspace: Workspace, thread_id: str) -> dict[str, Any]:
             },
             "timeline": [audit_view(record) for record in records],
             "wire": _wire_for(workspace, records, action_ids),
+            "policy": _policy_for(records),
             "stalled": not state.status.is_terminal and not state.is_waiting,
         }
     )
     return detail
+
+
+def _policy_for(records: Sequence[AuditRecord]) -> dict[str, Any] | None:
+    """The response policy's reasoning for this incident, read from the audit row.
+
+    From the chain rather than recomputed: the dashboard shows what the Containment
+    Agent recorded when it decided, which is what an auditor would read.
+    """
+    for record in records:
+        if record.event_type in (
+            AuditEventType.ACTION_PROPOSED,
+            AuditEventType.POLICY_UPDATED,
+        ) and isinstance(record.payload.get("policy"), dict):
+            return {**record.payload["policy"], "seq": record.seq}
+    return None
 
 
 def _wire_for(
@@ -815,6 +831,16 @@ def _gates(value: Any, prefix: str = "") -> list[dict[str, Any]]:
     return gates
 
 
+def _augmentation_summary(section: Any) -> dict[str, Any] | None:
+    if not isinstance(section, dict):
+        return None
+    return {
+        "levels": section.get("levels"),
+        "raw_peak_overconfidence": section.get("raw_peak_overconfidence"),
+        "gated_peak_overconfidence": section.get("gated_peak_overconfidence"),
+    }
+
+
 def evaluation_view(path: Path) -> dict[str, Any]:
     """The F-12 report as the one evaluation pipeline wrote it, plus its gates.
 
@@ -839,6 +865,8 @@ def evaluation_view(path: Path) -> dict[str, Any]:
         "response_policy_regret_ratio": (data.get("response_policy") or {}).get(
             "regret_ratio"
         ),
+        "regret_curves": (data.get("response_policy") or {}).get("curves"),
+        "augmentation": _augmentation_summary(data.get("augmentation")),
     }
     gates = _gates(data)
     return {

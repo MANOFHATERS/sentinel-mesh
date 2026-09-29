@@ -494,9 +494,20 @@ def run_policy(*, n_episodes: int) -> dict[str, Any]:
         passed = False
         print(f"\n  gate assertion failed: {exc}")
 
+    # Section 9.1 asks for the cumulative-regret *curve* against the oracle, not only
+    # its total; the mean over seeds is what the dashboard's Evaluation page draws.
+    curves = {
+        "episode": list(range(1, n_episodes + 1)),
+        "policy": [float(v) for v in np.mean(
+            [r.cumulative_regret for r in learned], axis=0)],
+        "no_learning": [float(v) for v in np.mean(
+            [r.cumulative_regret for r in baseline], axis=0)],
+    }
+
     return {
         "episodes": n_episodes,
         "seeds": list(REPORTING_SEEDS),
+        "curves": curves,
         "policy": stats,
         "baseline": reference,
         "regret_ratio": ratio,

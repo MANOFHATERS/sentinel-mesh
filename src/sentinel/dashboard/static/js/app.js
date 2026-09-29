@@ -19,6 +19,7 @@ import {
   shortId,
   toneOf,
 } from "./format.js";
+import { barChart, lineChart } from "./charts.js";
 import { renderGraph } from "./graph.js";
 
 const root = document.getElementById("app");
@@ -157,6 +158,7 @@ const NAV = [
   ["code-scan", "Code scan"],
   ["wire", "Wire & guardrails"],
   ["audit", "Audit log"],
+  ["models", "Models"],
   ["evaluation", "Evaluation"],
 ];
 
@@ -272,7 +274,7 @@ async function refreshChrome() {
 // Routing
 // --------------------------------------------------------------------------- //
 
-const AUTO_REFRESH = new Set(["overview", "queue", "incidents", "scenarios", "wire"]);
+const AUTO_REFRESH = new Set(["overview", "queue", "incidents", "scenarios", "wire", "models"]);
 
 async function route() {
   if (!session) return;
@@ -568,6 +570,7 @@ function renderIncident(d) {
       h("div", { class: "stack" }, triagePanel(d), timingPanel(d)),
     ),
     reportPanel(d.report),
+    policyPanel(d.policy),
     actionsPanel(d),
     wirePanel(d.wire),
     historyPanel(d),
@@ -1075,7 +1078,191 @@ async function viewEvaluation() {
       statTile("Alert reduction", fmtPercent(hd.alert_reduction), `${fmtPercent(hd.alert_reduction_at_soc_base_rate)} at a 1% attack rate`),
       statTile("Regret ratio (bandit)", fmtNumber(hd.response_policy_regret_ratio)),
     ),
+    h("div", { class: "grid-2" }, alertReductionPanel(hd), regretPanel(hd.regret_curves)),
     h("div", { class: "grid-2" }, section("Gates", table(["Gate", "Result"], gates)), section("Per-family recall", table(["Family", "Recall"], families))),
+  );
+}
+
+// F-12: "FP-reduction chart". Share of alerts that reach a human, raw feed vs after triage.
+function alertReductionPanel(hd) {
+  if (!Number.isFinite(hd.alert_reduction)) return section("Alert reduction (F-12)", empty("Not in this report."));
+  const categories = ["Raw feed", "After triage (test split)"];
+  const values = [1, 1 - hd.alert_reduction];
+  if (Number.isFinite(hd.alert_reduction_at_soc_base_rate)) {
+    categories.push("After triage, 1% attack rate");
+    values.push(1 - hd.alert_reduction_at_soc_base_rate);
+  }
+  return section(
+    "Alert reduction (F-12, §9.1)",
+    barChart({
+      title: "Alerts reaching a human",
+      categories,
+      series: [{ name: "Share of alerts reaching a human", values }],
+      yMax: 1,
+      percent: true,
+      describe: "§9.1 target: at least 60% fewer than the raw feed",
+    }),
+    h("p", { class: "meta" }, "The test split is one-third attacks, so every attack caught is an alert a human must see; the 1%-rate bar projects the measured false-positive rate and recall onto a realistic feed."),
+  );
+}
+
+// §9.1: "cumulative regret curve vs. an oracle policy". The oracle's regret is zero by definition.
+function regretPanel(curves) {
+  if (!curves) return section("Response-policy regret (§9.1)", empty("This report was written without --policy, or before curves were recorded; re-run scripts/evaluate.py --policy."));
+  return section(
+    "Response-policy regret (F-09, §9.1)",
+    lineChart({
+      title: "Cumulative regret vs. the oracle",
+      x: curves.episode,
+      series: [
+        { name: "Learned policy", values: curves.policy },
+        { name: "No learning", values: curves.no_learning },
+      ],
+      xLabel: "episode",
+      yLabel: "cumulative regret",
+      describe: "mean over the held-out seeds; the oracle is the zero line",
+    }),
+  );
+}
+
+// --- models -------------------------------------------------------------------- //
+
+async function viewModels() {
+  const m = await api.get("/api/models");
+  const ae = m.autoencoder;
+  const gnn = m.gnn;
+  const pol = m.policy;
+  const dif = m.diffusion;
+  const epochs = (n) => Array.from({ length: n }, (_, i) => i + 1);
+  return h(
+    "div",
+    { class: "stack" },
+    h("h1", {}, "Models"),
+    h(
+      "p",
+      { class: "lede" },
+      `Every model below was trained by this server when it started (seed ${m.seed}), on the synthetic corpus. These are live training records; the acceptance numbers come from the one evaluation pipeline and are on the Evaluation page.`,
+    ),
+    h(
+      "div",
+      { class: "tiles" },
+      statTile("Autoencoder", `${ae.epochs_run ?? "—"} epochs`, `${ae.n_parameters ?? "—"} parameters${ae.stopped_early ? " · stopped early" : ""}`),
+      statTile("GNN top-10 precision", fmtNumber(gnn.evaluation.gnn_top_k_precision, 2), `features-only baseline ${fmtNumber(gnn.evaluation.features_only_top_k_precision, 2)} · target 0.80`, gnn.evaluation.gnn_top_k_precision >= 0.8 ? "good" : "warn"),
+      statTile("Policy optimal-action rate", fmtPercent(pol.optimal_action_rate), `${pol.episodes} training episodes`),
+      statTile("Policy decisions served", String(pol.live_decisions), "incidents the Containment Agent sent to the policy"),
+      statTile("Diffusion study", dif.status, `${dif.levels_done}/${dif.levels_total} scarcity levels`, dif.status === "failed" ? "bad" : "neutral"),
+    ),
+    section(
+      "Anomaly detection — denoising autoencoder (§5.5.2)",
+      h("p", { class: "meta" }, `Trained on benign traffic only; paired with an Isolation Forest. Ensemble weights: ${ae.detectors.map((d) => `${d.name} ${fmtNumber(d.weight, 2)}`).join(", ")}.`),
+      ae.available
+        ? lineChart({
+            title: "Reconstruction loss per epoch",
+            x: epochs(ae.train_loss.length),
+            series: [
+              { name: "Training", values: ae.train_loss },
+              { name: "Validation", values: ae.validation_loss },
+            ].filter((sr) => sr.values.length === ae.train_loss.length),
+            xLabel: "epoch",
+            yLabel: "MSE",
+            describe: "early stopping keeps the best validation epoch",
+          })
+        : empty("No training history recorded."),
+    ),
+    section(
+      "Supply-chain risk — 2-layer GraphSAGE (§5.5.3, F-06)",
+      h("p", { class: "meta" }, `${gnn.objective} objective, ${gnn.aggregation} aggregation, ${gnn.n_parameters} parameters, best epoch ${gnn.best_epoch}. ${gnn.evaluation.note}`),
+      lineChart({
+        title: "GNN loss per epoch",
+        x: epochs(gnn.train_loss.length),
+        series: [
+          { name: "Training", values: gnn.train_loss },
+          { name: "Validation", values: gnn.validation_loss },
+        ].filter((sr) => sr.values.length === gnn.train_loss.length),
+        xLabel: "epoch",
+        yLabel: "loss",
+      }),
+      barChart({
+        title: `Top-${gnn.evaluation.k} precision on the ${gnn.evaluation.test_nodes}-node test split`,
+        categories: ["GNN (uses the graph)", "Features only (no graph)"],
+        series: [{ name: "Top-10 precision", values: [gnn.evaluation.gnn_top_k_precision, gnn.evaluation.features_only_top_k_precision] }],
+        yMax: 1,
+        describe: "the gap is what the graph contributes",
+      }),
+    ),
+    section(
+      "Response policy — contextual bandit (§5.5.4, F-09)",
+      h("p", { class: "meta" }, `Thompson sampling, trained on ${pol.episodes} simulated incidents in ${fmtSeconds(pol.seconds)}. Served ${pol.serving}. Action mix while learning: ${Object.entries(pol.action_counts).map(([k, v]) => `${humanize(k)} ${v}`).join(", ")}.`),
+      lineChart({
+        title: "Cumulative regret while learning",
+        x: pol.curve.episode,
+        series: [
+          { name: "Learned policy", values: pol.curve.policy },
+          { name: "No learning", values: pol.curve.no_learning },
+        ],
+        xLabel: "episode",
+        yLabel: "cumulative regret",
+        describe: `regret ratio ${fmtNumber(pol.regret_ratio, 3)} of the no-learning policy`,
+      }),
+    ),
+    diffusionPanel(dif),
+  );
+}
+
+function diffusionPanel(dif) {
+  const intro = h("p", { class: "meta" }, "A class-conditional tabular diffusion model generates extra rare-attack rows; a classifier is trained with and without them. Reported whatever the sign: on this corpus augmentation is about neutral with full data and hurts when data is scarce, as Part 2 also measured.");
+  if (dif.status === "failed") return section("Diffusion augmentation (§5.5.5)", intro, errorBox(new Error(dif.error)));
+  if (!dif.results.length) {
+    return section("Diffusion augmentation (§5.5.5)", intro, h("p", { class: "loading" }, dif.status === "pending" ? "Not started (runs in the background when the dashboard starts)." : "Training in the background… this page refreshes when you reopen it."));
+  }
+  return section(
+    "Diffusion augmentation (§5.5.5)",
+    intro,
+    barChart({
+      title: "Rare-attack recall, mean of four families",
+      categories: dif.results.map((r) => r.level),
+      series: [
+        { name: "Real data only", values: dif.results.map((r) => r.before_macro) },
+        { name: "With diffusion rows", values: dif.results.map((r) => r.after_macro) },
+      ],
+      yMax: 1,
+      describe: `${dif.levels_done}/${dif.levels_total} levels done`,
+    }),
+    dif.loss_curve.length
+      ? lineChart({
+          title: "Diffusion training loss (all-data level)",
+          x: Array.from({ length: dif.loss_curve.length }, (_, i) => i + 1),
+          series: [{ name: "Training loss", values: dif.loss_curve }],
+          xLabel: "epoch (sampled)",
+          yLabel: "loss",
+        })
+      : null,
+  );
+}
+
+function policyPanel(policy) {
+  if (!policy) return null;
+  if (!policy.fitted) {
+    return section("Response policy (§5.5.4)", h("p", { class: "meta" }, `No policy fitted; the response follows triage: ${humanize(policy.response)}.`));
+  }
+  const options = Object.entries(policy.expected).sort((a, b) => b[1] - a[1]);
+  return section(
+    "Response policy (§5.5.4)",
+    h(
+      "p",
+      { class: "decision-what" },
+      `Policy chose ${humanize(policy.choice)}`,
+      policy.floored ? ` → raised to ${humanize(policy.response)} by the triage floor` : "",
+    ),
+    kv([
+      ["Confidence", fmtNumber(policy.confidence, 3)],
+      ["Explored?", policy.exploratory ? "yes" : "no — greedy (posterior mean)"],
+      ["Triage floor applied", policy.floored ? "yes: the policy may raise attention, never lower it" : "no"],
+    ]),
+    table(
+      ["Option", "Expected reward"],
+      options.map(([name, value]) => h("tr", { class: name === policy.choice ? "row-good" : "" }, h("td", {}, humanize(name)), h("td", { class: "num" }, fmtNumber(value, 3)))),
+    ),
   );
 }
 
@@ -1090,6 +1277,7 @@ const VIEWS = {
   wire: viewWire,
   audit: viewAudit,
   evaluation: viewEvaluation,
+  models: viewModels,
 };
 
 // --------------------------------------------------------------------------- //

@@ -421,3 +421,45 @@ def test_tokens_for_a_tenant_without_a_workspace_are_a_configuration_error(mesh_
             create_app({"acme": acme}, tokens)
         with pytest.raises(AuthError, match="serves tenant"):
             create_app({"globex": acme}, tokens)
+
+
+# --------------------------------------------------------------------------- #
+# Part 5.1: the response policy in the live flow, and the Models page
+# --------------------------------------------------------------------------- #
+
+
+def test_each_incident_records_the_policy_s_reasoning(stack):
+    client, *_ = stack
+    ids = client.post("/api/scenarios/phishing-lateral/launch", headers=auth()).json()
+    for incident_id in ids["incidents"]:
+        detail = client.get(f"/api/incidents/{incident_id}", headers=auth()).json()
+        policy = detail["policy"]
+        assert policy is not None and policy["fitted"] is True
+        assert policy["response"] == "escalate"
+        assert policy["choice"] in ("escalate", "monitor", "dismiss")
+        assert set(policy["expected"]) == {"escalate", "monitor", "dismiss"}, (
+            "at the recommend tier auto-contain is masked out of the policy entirely"
+        )
+        assert 0.0 <= policy["confidence"] <= 1.0
+        assert policy["exploratory"] is False, "served greedily"
+        assert policy["seq"] >= 1, "read from the audit chain"
+
+
+def test_models_page_reports_live_training(stack):
+    client, *_ = stack
+    assert client.get("/api/models").status_code == 401
+    client.post("/api/scenarios/phishing-lateral/launch", headers=auth())
+    report = client.get("/api/models", headers=auth()).json()
+    assert report["autoencoder"]["available"]
+    assert len(report["autoencoder"]["train_loss"]) >= 2
+    assert {d["name"] for d in report["autoencoder"]["detectors"]} >= {"denoising_autoencoder"}
+    gnn = report["gnn"]
+    assert len(gnn["train_loss"]) == len(gnn["validation_loss"]) >= 2
+    assert 0.0 <= gnn["evaluation"]["gnn_top_k_precision"] <= 1.0
+    policy = report["policy"]
+    assert policy["live_decisions"] >= 3, "the scenario's three incidents went through it"
+    assert policy["policy_total_regret"] < policy["no_learning_total_regret"]
+    assert len(policy["curve"]["policy"]) == len(policy["curve"]["no_learning"])
+    # The fixture never starts the background study, and the page says so honestly.
+    assert report["diffusion"]["status"] == "pending"
+    assert report["diffusion"]["results"] == []
