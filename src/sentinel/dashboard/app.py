@@ -46,6 +46,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from sentinel.dashboard import views
 from sentinel.dashboard.auth import AuthError, Identity, TokenRegistry
 from sentinel.dashboard.lab import model_report
+from sentinel.dashboard.runs import Busy, RunManager, RunsUnavailable
 from sentinel.dashboard.scenarios import ASSET_INVENTORY, ScenarioName
 from sentinel.dashboard.sso import SsoService, install_sso
 from sentinel.dashboard.workspace import Conflict, NotFound, Workspace, WorkspaceError
@@ -82,6 +83,13 @@ class DecisionBody(BaseModel):
     note: str = Field(default="", max_length=2000)
 
 
+class RunBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str = Field(pattern="^(retrain|eval_quick|eval_full)$")
+    seed: int = Field(default=20260928, ge=0, le=2**31 - 1)
+
+
 class ReplayBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -94,6 +102,7 @@ def create_app(
     *,
     evaluation_path: Path | None = None,
     sso: SsoService | None = None,
+    runs: RunManager | None = None,
 ) -> FastAPI:
     """Build the app. Every tenant a token names must have a workspace."""
     missing = sorted(tokens.tenants - set(workspaces))
@@ -302,6 +311,31 @@ def create_app(
     @app.get("/api/evaluation")
     def evaluation_report(_who: Who) -> dict[str, Any]:
         return views.evaluation_view(evaluation)
+
+    @app.get("/api/runs")
+    def runs_state(_who: Who) -> dict[str, Any]:
+        if runs is None:
+            return {"enabled": False, "available": {}, "busy": None, "jobs": {}}
+        return {"enabled": True, **runs.latest()}
+
+    @app.post("/api/runs", status_code=202)
+    def start_run(body: RunBody, who: Actor) -> dict[str, Any]:
+        if runs is None:
+            raise NotFound("live runs are not enabled on this server")
+        try:
+            job = runs.start(body.kind, body.seed, by=who.principal)
+        except Busy as exc:
+            raise Conflict(str(exc)) from exc
+        except RunsUnavailable as exc:
+            raise NotFound(str(exc)) from exc
+        return runs.describe(job)
+
+    @app.post("/api/runs/{job_id}/cancel")
+    def cancel_run(job_id: str, _who: Actor) -> dict[str, Any]:
+        job = runs.cancel(job_id) if runs is not None else None
+        if job is None:
+            raise NotFound(f"no run {job_id!r}")
+        return runs.describe(job)
 
     @app.get("/api/models")
     def models_report(ws: Ws) -> dict[str, Any]:

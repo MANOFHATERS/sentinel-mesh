@@ -49,3 +49,12 @@ def test_the_live_feed_is_analyst_only_and_leaves_the_approval_queue_guarded():
     # while live, only pages without approve/reject controls refresh under the pointer
     assert 'name === "overview" || name === "incidents"' in source
     assert '"queue"' not in source.split("const liveView")[1].split("\n")[0]
+
+
+def test_live_run_controls_are_analyst_only_and_the_saved_report_stays_the_default():
+    source = (STATIC / "js" / "app.js").read_text(encoding="utf-8")
+    assert "const canRun = session.can_act;" in source
+    assert 'api.post("/api/runs"' in source
+    # the pages still open on the saved / start-up results; a live run is added beside them
+    assert "`Saved report (" in source and '"Trained at server start-up"' in source
+    assert "liveEvaluationBlock(runs.jobs[kind], e)" in source

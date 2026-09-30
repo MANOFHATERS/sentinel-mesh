@@ -1750,7 +1750,11 @@ def run_connectors(*, n: int, seed: int, incidents: int) -> dict[str, Any]:
         work = _Path(tempfile.mkdtemp(prefix="sentinel-crash-"))
         crash_clock = SimulationClock(datetime(2026, 9, 29, 9, 0, 0, tzinfo=UTC))
         crash_log = HashChainedAuditLog(work / "audit.sqlite", clock=crash_clock)
-        box = Sandbox(hosts=[a.asset_id for a in feed], clock=crash_clock).start()
+        # Search past the driven feed for a gated incident: whether one of the first N
+        # flows happens to escalate depends on the seed, and a crash test that can only
+        # run for some seeds cannot back a "run it under any seed" claim.
+        pool = [alerts[i] for i in split.test]
+        box = Sandbox(hosts=[a.asset_id for a in pool], clock=crash_clock).start()
 
         def build(connector, store):
             return build_incident_graph(
@@ -1767,13 +1771,13 @@ def run_connectors(*, n: int, seed: int, incidents: int) -> dict[str, Any]:
                 g = build(_CrashAfterGatedCall(box.router(tenant_id=tenant, audit=crash_log,
                                                           journal=j1)), store)
                 paused = None
-                for alert in feed:
+                for alert in pool:
                     run = g.invoke(new_incident(alert, at=crash_clock.now()),
                                    clock=crash_clock, audit=crash_log)
                     if run.interrupted:
                         paused = run
                         break
-                assert paused is not None, "no gated incident in the feed"
+                assert paused is not None, "no gated incident in the whole test split"
                 crash_clock.advance(12.0)
                 with contextlib.suppress(_Crash):
                     g.resume(paused.state.incident_id,

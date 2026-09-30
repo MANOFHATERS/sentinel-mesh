@@ -479,3 +479,11 @@ tr.row-good td { background: var(--good-bg); }
 
 .btn.live { font-variant-numeric: tabular-nums; }
 .btn.live.live-on { background: var(--good-bg); color: var(--good); border-color: transparent; }
+
+/* --- live runs ------------------------------------------------------------------- */
+
+.run-controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; margin: 10px 0; }
+.run-option { display: flex; flex-direction: column; gap: 4px; max-width: 320px; }
+.run-status { min-height: 1.6em; display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.run-log { margin: 0; padding: 8px 10px; background: var(--surface-2); border-radius: 8px; font-size: 0.8rem; white-space: pre-wrap; max-width: 100%; overflow-wrap: anywhere; }
+.sub-h { margin: 8px 0 0; font-size: 1.05rem; color: var(--muted); }

@@ -3,7 +3,7 @@
 An autonomous, agentic security operations platform for the mid-market and the MSSPs
 that protect it. Implementation of [`Sentinel_Mesh_PRD.docx`](Sentinel_Mesh_PRD.docx).
 
-**Status: Parts 1–5.3 complete; every PRD acceptance criterion F-01 to F-12 is met** — the foundation (ingestion, contracts,
+**Status: Parts 1–5.4 complete; every PRD acceptance criterion F-01 to F-12 is met** — the foundation (ingestion, contracts,
 tamper-evident audit, anomaly detection), the intelligence core (deep detector,
 supply-chain GNN, RAG knowledge base, bandit response policy, diffusion augmentation),
 the full agent layer (**all five PRD agents** across three checkpointed graphs sharing
@@ -532,6 +532,12 @@ hiding a button is the interface, the check on the server is the security). SCIM
 `/scim/v2/Users` provisions and deactivates users, and deactivating one ends their live
 sessions at once. Sessions are a 15-minute access token with a rotating refresh token; every
 sign-in, refusal and refresh is written to a hash-chained log shown on the Audit page.
+
+**Live runs.** The Models and Evaluation pages open on saved results. An analyst can also
+re-train the models under a chosen seed (~12 s), run a quick evaluation (~18 s) or the full
+evaluation (~3 min, published seed) and see the result beside the saved one; the saved report
+is never overwritten. The Overview has a live-feed toggle that streams alerts through the
+pipeline on a timer.
 
 `--dev-idp` starts a stand-in identity provider so this can be demonstrated on a laptop.
 **It is the only provider this has been tested against**; a real Okta or Azure AD tenant is

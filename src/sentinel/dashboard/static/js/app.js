@@ -210,6 +210,92 @@ function renderShell() {
   ]);
 }
 
+// --- live runs (Models and Evaluation pages) ------------------------------------- //
+
+let runsTimer = null;
+
+function stopRunsPoll() {
+  if (runsTimer) clearInterval(runsTimer);
+  runsTimer = null;
+}
+
+function runningJob(runs) {
+  return Object.values(runs.jobs).find((j) => j.state === "running") || null;
+}
+
+function runStatus(job) {
+  const label = { retrain: "Re-training", eval_quick: "Quick evaluation", eval_full: "Full evaluation" }[job.kind];
+  return [
+    h("strong", {}, `${label} running — ${fmtNumber(job.elapsed_s, 0)} s (seed ${job.seed}, started by ${job.started_by})`),
+    job.log.length ? h("pre", { class: "run-log" }, job.log.slice(-4).join("\n")) : null,
+  ];
+}
+
+function runPanel(runs, { title, intro, kinds, seed }) {
+  if (!runs.enabled) return null;
+  const status = h("div", { class: "run-status", role: "status" });
+  const seedInput = h("input", { type: "number", min: "0", max: "2147483647", value: "20260928", id: `seed-${kinds[0].kind}`, class: "narrow", "aria-label": "random seed" });
+  const buttons = [];
+  const fixedSeeds = Object.fromEntries(kinds.filter((k) => k.fixedSeed !== undefined).map((k) => [k.kind, k.fixedSeed]));
+  const canRun = session.can_act;
+
+  function paint(state) {
+    const job = runningJob(state);
+    buttons.forEach((b) => (b.disabled = Boolean(job)));
+    if (job) {
+      const cancel = job.kind === "retrain" || !session.can_act ? null : h("button", { class: "btn", type: "button", onclick: () => api.post(`/api/runs/${job.id}/cancel`).catch(alertError) }, "Cancel");
+      replace(status, ...runStatus(job), cancel);
+    } else {
+      const failed = kinds.map((k) => state.jobs[k.kind]).find((j) => j && (j.state === "failed" || j.state === "cancelled"));
+      replace(status, failed ? h("span", { class: "meta" }, failed.state === "cancelled" ? "The last run was cancelled." : `The last run failed: ${failed.error}`) : "");
+    }
+    return job;
+  }
+
+  function poll() {
+    stopRunsPoll();
+    runsTimer = setInterval(async () => {
+      try {
+        const state = await api.get("/api/runs");
+        if (!paint(state)) {
+          stopRunsPoll();
+          route(); // finished: redraw the page with the result in it
+        }
+      } catch {
+        stopRunsPoll();
+      }
+    }, 1500);
+  }
+
+  async function start(kind) {
+    buttons.forEach((b) => (b.disabled = true));
+    try {
+      await api.post("/api/runs", { kind, seed: fixedSeeds[kind] ?? Number(seedInput.value) });
+      paint(await api.get("/api/runs"));
+      poll();
+    } catch (error) {
+      replace(status, errorBox(error));
+      buttons.forEach((b) => (b.disabled = false));
+    }
+  }
+
+  const controls = canRun
+    ? h(
+        "div",
+        { class: "run-controls" },
+        seed ? h("label", { for: seedInput.id }, "Seed") : null,
+        seed ? seedInput : null,
+        kinds.map((k) => {
+          const b = h("button", { class: "btn primary", type: "button", disabled: !runs.available[k.kind], title: runs.available[k.kind] ? "" : "scripts/evaluate.py is not present in this installation", onclick: () => start(k.kind) }, k.label);
+          buttons.push(b);
+          return h("div", { class: "run-option" }, b, h("span", { class: "meta" }, k.hint));
+        }),
+      )
+    : h("p", { class: "meta" }, "Only an analyst can start a run; the latest result is shown below when there is one.");
+  if (paint(runs)) poll();
+  return section(title, h("p", { class: "meta" }, intro), controls, status);
+}
+
 // --- live feed --------------------------------------------------------------- //
 // Streams held-out flows through the incident graph a few at a time, so alerts keep
 // arriving while someone talks, instead of one click ingesting a batch. It is the same
@@ -399,6 +485,7 @@ function renderLogin(message) {
 function stopRefresh() {
   if (refreshTimer) clearInterval(refreshTimer);
   refreshTimer = null;
+  stopRunsPoll();
 }
 
 async function refreshChrome() {
@@ -1221,17 +1308,60 @@ async function viewAudit(arg) {
 // --- evaluation -------------------------------------------------------------- //
 
 async function viewEvaluation() {
-  const e = await api.get("/api/evaluation");
-  if (!e.available) {
-    return h("div", { class: "stack" }, h("h1", {}, "Evaluation"), empty(`No evaluation artifact at ${e.path}. Run scripts/evaluate.py.`));
-  }
+  const [e, runs] = await Promise.all([api.get("/api/evaluation"), api.get("/api/runs")]);
+  const panel = runPanel(runs, {
+    title: "Run it live",
+    intro: "The report below is the saved result. To watch the numbers being produced instead, run the same evaluation pipeline now. A live run never overwrites the saved report; it appears next to it.",
+    kinds: [
+      { kind: "eval_quick", label: "Quick run", hint: "5,000 alerts · detector, supply-chain graph, knowledge base, response policy · about 20 seconds · uses the seed above" },
+      { kind: "eval_full", label: "Full run", fixedSeed: 20260928, hint: "20,000 alerts · every gate, all five agents, connectors and this dashboard end to end · about 3 minutes · always the published seed 20260928, so it reproduces the saved report" },
+    ],
+    seed: true,
+  });
+  const liveBlocks = ["eval_quick", "eval_full"]
+    .map((kind) => liveEvaluationBlock(runs.jobs[kind], e))
+    .filter(Boolean);
+  const saved = e.available
+    ? [h("h2", { class: "sub-h" }, `Saved report (${e.n_alerts ? fmtNumber(e.n_alerts, 0) + " alerts" : "full run"})`), ...evaluationBody(e)]
+    : [empty(`No saved evaluation artifact at ${e.path}. Run scripts/evaluate.py, or use a live run above.`)];
+  return h("div", { class: "stack" }, h("h1", {}, "Evaluation report (F-12)"), panel, ...liveBlocks, ...saved);
+}
+
+function liveEvaluationBlock(job, saved) {
+  if (!job || job.state !== "done" || !job.result || !job.result.available) return null;
+  const live = job.result;
+  const label = job.kind === "eval_quick" ? "Quick" : "Full";
+  const gatesLive = `${live.passed}/${live.gates.length}`;
+  const gatesSaved = saved.available ? `${saved.passed}/${saved.gates.length}` : "—";
+  const rows = [
+    ["Alerts evaluated", saved.available ? fmtNumber(saved.n_alerts, 0) : "—", fmtNumber(live.n_alerts, 0)],
+    ["ROC-AUC (F-03, needs ≥ 0.90)", ...pair(saved, live, (x) => x.headline.roc_auc, 4)],
+    ["PR-AUC", ...pair(saved, live, (x) => x.headline.pr_auc, 4)],
+    ["Recall", ...pair(saved, live, (x) => x.headline.recall, 4)],
+    ["Precision", ...pair(saved, live, (x) => x.headline.precision, 4)],
+    ["Alert reduction (test split)", ...pair(saved, live, (x) => x.headline.alert_reduction, 3, true)],
+    ["Alert reduction at a 1% attack rate", ...pair(saved, live, (x) => x.headline.alert_reduction_at_soc_base_rate, 3, true)],
+    ["Regret ratio (bandit)", ...pair(saved, live, (x) => x.headline.response_policy_regret_ratio, 3)],
+    ["Gates passing", gatesSaved, gatesLive],
+  ];
+  return section(
+    `Live run — ${label}, seed ${job.seed}, ${fmtNumber(job.elapsed_s, 0)} s`,
+    h("p", { class: "meta" }, `Produced just now by scripts/evaluate.py, started by ${job.started_by}. ${job.exit_code ? "One or more gates failed; they are listed below." : "Every gate in this run passed."} A smaller corpus and a different seed move the numbers a little; that is expected, not a discrepancy.`),
+    table(["Metric", "Saved report", `Live ${label.toLowerCase()} run`], rows.map(([name, a, b]) => h("tr", {}, h("td", {}, name), h("td", { class: "num" }, a), h("td", { class: "num" }, b)))),
+    h("details", {}, h("summary", {}, "Everything in this live run"), h("div", { class: "stack" }, ...evaluationBody(live))),
+  );
+}
+
+function pair(saved, live, pick, digits, percent = false) {
+  const fmt = (x) => (Number.isFinite(x) ? (percent ? fmtPercent(x) : fmtNumber(x, digits)) : "—");
+  return [saved.available ? fmt(pick(saved)) : "—", fmt(pick(live))];
+}
+
+function evaluationBody(e) {
   const gates = e.gates.map((g) => h("tr", { class: g.passed ? "" : "row-bad" }, h("td", {}, h("code", {}, g.gate)), h("td", {}, badge(g.passed ? "completed" : "failed", g.passed ? "pass" : "FAIL"))));
   const hd = e.headline;
   const families = Object.entries(hd.per_family_recall || {}).map(([family, recall]) => h("tr", {}, h("td", {}, family), h("td", { class: "num" }, fmtNumber(recall))));
-  return h(
-    "div",
-    { class: "stack" },
-    h("h1", {}, "Evaluation report (F-12)"),
+  return [
     h("p", { class: "lede" }, `Read verbatim from ${e.path}, written by scripts/evaluate.py — the one evaluation pipeline (PRD §9.3). ${e.passed}/${e.gates.length} gates pass.`),
     h(
       "div",
@@ -1245,7 +1375,7 @@ async function viewEvaluation() {
     ),
     h("div", { class: "grid-2" }, alertReductionPanel(hd), regretPanel(hd.regret_curves)),
     h("div", { class: "grid-2" }, section("Gates", table(["Gate", "Result"], gates)), section("Per-family recall", table(["Family", "Recall"], families))),
-  );
+  ];
 }
 
 // F-12: "FP-reduction chart". Share of alerts that reach a human, raw feed vs after triage.
@@ -1293,20 +1423,55 @@ function regretPanel(curves) {
 // --- models -------------------------------------------------------------------- //
 
 async function viewModels() {
-  const m = await api.get("/api/models");
+  const [m, runs] = await Promise.all([api.get("/api/models"), api.get("/api/runs")]);
+  const panel = runPanel(runs, {
+    title: "Re-train live",
+    intro: "Everything below was trained when the server started, under one seed. Re-train the autoencoder, the supply-chain GNN and the response policy now under a seed of your choice: a different seed giving similar numbers shows the results were not cherry-picked. The models serving the live incident flow are not replaced.",
+    kinds: [{ kind: "retrain", label: "Re-train", hint: "about 15 seconds" }],
+    seed: true,
+  });
+  const job = runs.jobs.retrain;
+  const live = job && job.state === "done" && job.result ? liveRetrainBlock(job, m) : null;
+  return h(
+    "div",
+    { class: "stack" },
+    h("h1", {}, "Models"),
+    panel,
+    live,
+    h("h2", { class: "sub-h" }, "Trained at server start-up"),
+    ...modelsBody(m, { diffusion: true }),
+  );
+}
+
+function liveRetrainBlock(job, startup) {
+  const live = job.result;
+  const rows = [
+    ["Seed", String(startup.seed), String(live.seed)],
+    ["Autoencoder epochs run", String(startup.autoencoder.epochs_run ?? "—"), String(live.autoencoder.epochs_run ?? "—")],
+    ["GNN top-10 precision (target 0.80)", fmtNumber(startup.gnn.evaluation.gnn_top_k_precision, 2), fmtNumber(live.gnn.evaluation.gnn_top_k_precision, 2)],
+    ["Features-only baseline (no graph)", fmtNumber(startup.gnn.evaluation.features_only_top_k_precision, 2), fmtNumber(live.gnn.evaluation.features_only_top_k_precision, 2)],
+    ["Policy optimal-action rate", fmtPercent(startup.policy.optimal_action_rate), fmtPercent(live.policy.optimal_action_rate)],
+    ["Policy regret vs no learning", fmtNumber(startup.policy.regret_ratio, 3), fmtNumber(live.policy.regret_ratio, 3)],
+  ];
+  return section(
+    `Live re-train — seed ${job.seed}, ${fmtNumber(job.elapsed_s, 0)} s`,
+    h("p", { class: "meta" }, `Trained just now, started by ${job.started_by}, on a fresh synthetic corpus under this seed. Compared with the start-up run below; these models are a second opinion and are not serving anything.`),
+    table(["", "Start-up run", "Live re-train"], rows.map(([name, a, b]) => h("tr", {}, h("td", {}, name), h("td", { class: "num" }, a), h("td", { class: "num" }, b)))),
+    h("details", {}, h("summary", {}, "The full live training record"), h("div", { class: "stack" }, ...modelsBody(live, { diffusion: false }))),
+  );
+}
+
+function modelsBody(m, { diffusion }) {
   const ae = m.autoencoder;
   const gnn = m.gnn;
   const pol = m.policy;
   const dif = m.diffusion;
   const epochs = (n) => Array.from({ length: n }, (_, i) => i + 1);
-  return h(
-    "div",
-    { class: "stack" },
-    h("h1", {}, "Models"),
+  return [
     h(
       "p",
       { class: "lede" },
-      `Every model below was trained by this server when it started (seed ${m.seed}), on the synthetic corpus. These are live training records; the acceptance numbers come from the one evaluation pipeline and are on the Evaluation page.`,
+      `These are training records on the synthetic corpus (seed ${m.seed}); the acceptance numbers come from the one evaluation pipeline and are on the Evaluation page.`,
     ),
     h(
       "div",
@@ -1370,8 +1535,8 @@ async function viewModels() {
         describe: `regret ratio ${fmtNumber(pol.regret_ratio, 3)} of the no-learning policy`,
       }),
     ),
-    diffusionPanel(dif),
-  );
+    diffusion ? diffusionPanel(dif) : null,
+  ];
 }
 
 function diffusionPanel(dif) {

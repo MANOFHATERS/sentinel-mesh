@@ -113,7 +113,16 @@ def main(argv: list[str] | None = None) -> int:
             [Identity(f"analyst@{t}.example", t, Role.ANALYST) for t in tenants]
             + [Identity(f"viewer@{t}.example", t, Role.VIEWER) for t in tenants]
         )
-    app = create_app(workspaces, tokens, evaluation_path=args.evaluation, sso=sso)
+    from sentinel.dashboard.lab import model_report
+    from sentinel.dashboard.runs import RunManager
+    from sentinel.dashboard.views import evaluation_view
+
+    runs = RunManager(
+        workdir=root / "runs",
+        retrain=lambda seed: model_report(MeshModels.build(seed=seed, n_alerts=args.alerts)),
+        read_evaluation=evaluation_view,
+    )
+    app = create_app(workspaces, tokens, evaluation_path=args.evaluation, sso=sso, runs=runs)
     if idp is not None:
         app.mount("/devidp", idp)
     print(f"ready in {time.perf_counter() - started:.1f}s; state in {root}")

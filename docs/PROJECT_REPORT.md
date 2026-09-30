@@ -107,6 +107,11 @@ Prompted by three real observations while demoing (empty pages, dead Launch butt
 
 The browser still uses a bearer header (no cookie, so no CSRF surface); the token reaches the page as a one-time handoff code in the URL *fragment*.
 
+### Part 5.4 — Live feed and live runs *(built in this working session)*
+- **Live feed:** an analyst-only toggle streams held-out alerts through the incident graph (4 every 2 s), so the Overview counters and the approval queue move on their own.
+- **Live runs:** the Models and Evaluation pages open on saved results; an analyst can re-train the models under any seed (~12 s), run a quick evaluation (~18 s) or the full evaluation (~3 min) and see the result beside the saved one. One run at a time, cancellable, and evaluations run as a subprocess of the one pipeline so the saved report is never overwritten.
+- **Two findings:** a crash-recovery experiment that only worked for some seeds (fixed), and agent-layer checks that are seed-sensitive because they drive a head slice of the test split (documented; the Full run is pinned to the published seed).
+
 ---
 
 ## 4. Measured results
@@ -169,6 +174,7 @@ python -m sentinel.dashboard --dev-idp   # single sign-on via the demo identity 
 - **No LLM has been called.** `AnthropicEngine` is written and tested against a fake transport, but every number was produced with `NullEngine`. The quality a model adds to narratives is unmeasured.
 - **No real external service has been contacted.** Connectors are real HTTP clients tested against strict local emulators; F-14 is post-sprint by the PRD.
 - **SSO has only been tested against the built-in demo provider.** A real Okta / Azure AD tenant is three settings away but untried. Sessions, the SCIM directory and the sign-in log are in memory (a restart signs everyone out); a group change applies at the next sign-in.
+- **The full evaluation is seed-sensitive in its agent-layer checks** (they drive the first 200–400 flows of the test split; under some seeds almost none escalate, so three gates fail). Published numbers use seed 20260928; the dashboard's Full run is pinned to it.
 - **F-06 sits on its bar** (0.80 vs 0.80; per-seed 0.60–0.90). Rank correlation (0.65) is the steadier figure.
 - **F-07 is a measurement on a 261-line fixture**, not a false-positive rate on a production codebase.
 - **The supply-chain graph is synthetic** (PRD §5.5.3), so the Supply-Chain Agent drafts no manifest edit; that needs CycloneDX ingestion.

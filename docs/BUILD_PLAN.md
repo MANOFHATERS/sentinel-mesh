@@ -1392,6 +1392,41 @@ only in page memory, so a reload within 15 minutes keeps the session and a reloa
 that goes back through the provider. Only the demo provider has been tested against; a
 real Okta / Azure AD tenant has not.
 
+## Part 5.4 — live runs: watch the models and the evaluation run ✅ COMPLETE
+
+The Models and Evaluation pages open on saved results, instant and identical every time.
+Each now has an optional **run it live** panel (analyst-only; viewers read the result),
+so a reader can watch the numbers produced instead of taking them on trust. Code in
+[dashboard/runs.py](../src/sentinel/dashboard/runs.py), tests in
+`tests/unit/test_dashboard_runs.py`.
+
+| Run | What it does | Time (this laptop) |
+|---|---|---|
+| **Re-train** (Models) | Trains the autoencoder, the GNN and the response policy again under a chosen seed, in-process, and shows them next to the start-up run. **Never replaces the models serving the live flow** | ~12 s |
+| **Quick run** (Evaluation) | `scripts/evaluate.py` on 5,000 alerts: detector, supply-chain graph, knowledge base, response policy; chosen seed | ~18 s |
+| **Full run** (Evaluation) | The complete evaluation, every gate, all five agents, connectors and the dashboard end to end; always the published seed | ~3 min |
+
+Design points: one run at a time (a second start is refused with 409, and a run can be
+cancelled); the evaluations run as a **subprocess of the one pipeline** (PRD §9.3), writing
+their own file, so the saved report is never overwritten and a crash cannot take the server
+down; a run whose gate fails still shows its report (the evaluation exits non-zero but
+writes it); the only user value reaching a command line is an integer seed.
+
+### Findings during Part 5.4
+
+1. **A cancel that landed before the worker had spawned its process did nothing.** Found by
+   a test; the flag is now set first and honoured the moment the process exists.
+2. **The full evaluation crashed for some seeds.** The crash-recovery experiment needed a
+   gated incident among the first 300 flows, and under seed 7 there were none. It now
+   searches the whole test split.
+3. **The agent-layer checks are seed-sensitive, and this is a known limitation, not fixed.**
+   Under seed 7 the first 200 flows of the test split are almost all benign (198 dismissed),
+   so nothing reaches the approval gate and three gates fail (F-04 interrupt/resume, §9.1
+   MTTC, connector F-08 wire) — not because triage is worse (its recall under seed 7 is
+   0.993) but because the check drives a head slice rather than a sample. Fixing it changes
+   every published agent number, so the **Full run is pinned to the published seed 20260928**;
+   Quick and Re-train accept any seed (Quick under seed 7: 4/4 gates).
+
 ## Running what exists
 
 ```bash
