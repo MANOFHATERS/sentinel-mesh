@@ -202,6 +202,9 @@ function renderShell() {
         h("button", { class: "btn ghost", type: "button", onclick: signOut }, "Sign out"),
       ),
     ),
+    session.can_act
+      ? null
+      : h("div", { class: "readonly-banner", role: "note" }, `Read-only view: you are signed in as a ${session.role}. Launching, approving and rejecting are available to analysts only.`),
     h("div", { class: "layout" }, nav, mainEl),
   ]);
 }
@@ -365,7 +368,7 @@ function scenarioCard(sc, { compact = false } = {}) {
     {
       class: "btn primary",
       type: "button",
-      disabled: sc.launched || !session.can_act,
+      disabled: sc.launched,
       onclick: async (event) => {
         event.currentTarget.disabled = true;
         try {
@@ -379,6 +382,8 @@ function scenarioCard(sc, { compact = false } = {}) {
     },
     sc.launched ? "Launched" : "Launch scenario",
   );
+  // A control the viewer role can never use is not rendered (least privilege in the UI);
+  // the API still answers 403, which is the actual enforcement.
   return h(
     "article",
     { class: `card scenario ${sc.complete ? "done" : ""}` },
@@ -405,7 +410,7 @@ function scenarioCard(sc, { compact = false } = {}) {
           ),
         )
       : null,
-    h("div", { class: "card-actions" }, launch),
+    session.can_act ? h("div", { class: "card-actions" }, launch) : null,
   );
 }
 
@@ -415,7 +420,9 @@ function replayPanel(remaining) {
   return section(
     "Background feed",
     h("p", {}, "Replay held-out flows through the same incident graph. Most are dismissed by triage; the ones that escalate join the approval queue — the alert-volume reduction above is measured on exactly this."),
-    h(
+    !session.can_act
+      ? null
+      : h(
       "div",
       { class: "row" },
       h("label", { for: "replay-count" }, "Flows"),
@@ -425,7 +432,7 @@ function replayPanel(remaining) {
         {
           class: "btn",
           type: "button",
-          disabled: !session.can_act || remaining === 0,
+          disabled: remaining === 0,
           onclick: async (event) => {
             const button = event.currentTarget;
             button.disabled = true;
@@ -597,11 +604,11 @@ function decisionPanel(d) {
       refreshChrome();
     } catch (error) {
       replace(status, errorBox(error));
-      buttons.forEach((b) => (b.disabled = !session.can_act));
+      buttons.forEach((b) => (b.disabled = false));
     }
   }
-  const approve = h("button", { class: "btn approve", type: "button", disabled: !session.can_act, onclick: () => decide(true) }, "Approve");
-  const reject = h("button", { class: "btn reject", type: "button", disabled: !session.can_act, onclick: () => decide(false) }, "Reject");
+  const approve = h("button", { class: "btn approve", type: "button", onclick: () => decide(true) }, "Approve");
+  const reject = h("button", { class: "btn reject", type: "button", onclick: () => decide(false) }, "Reject");
   buttons.push(approve, reject);
   return h(
     "section",
@@ -616,37 +623,41 @@ function decisionPanel(d) {
       ["Requested", `${fmtTime(d.interrupt.requested_at)} (${fmtAgo(d.interrupt.requested_at)})`],
     ]),
     action.evidence.length ? evidenceList(action.evidence, "Evidence attached to this action") : null,
-    h("label", { for: "decision-note" }, "Note"),
-    note,
-    h("div", { class: "row" }, approve, reject, session.can_act ? h("span", { class: "meta" }, `Recorded as ${session.principal}.`) : h("span", { class: "meta" }, "Viewers cannot decide.")),
+    ...(session.can_act
+      ? [
+          h("label", { for: "decision-note" }, "Note"),
+          note,
+          h("div", { class: "row" }, approve, reject, h("span", { class: "meta" }, `Recorded as ${session.principal}.`)),
+        ]
+      : [h("p", { class: "meta" }, "Waiting for an analyst to decide. Viewers can read the evidence but cannot approve or reject.")]),
     status,
   );
 }
 
 function recoverPanel(d) {
   const status = h("p", { class: "meta", role: "status" }, "");
+  const recover = h(
+    "button",
+    {
+      class: "btn primary",
+      type: "button",
+      onclick: async (event) => {
+        event.currentTarget.disabled = true;
+        try {
+          replace(mainEl, renderIncident(await api.post(`/api/incidents/${encodeURIComponent(d.incident_id)}/recover`)));
+        } catch (error) {
+          replace(status, errorBox(error));
+        }
+      },
+    },
+    "Recover run",
+  );
   return h(
     "section",
     { class: "panel alert tone-warn" },
     h("h2", {}, "Stalled run"),
     h("p", {}, `This run stopped at node "${d.history.length ? d.history[d.history.length - 1].node : "?"}" without finishing or pausing — a process died mid-node. Recovery re-runs from the last checkpoint; the execution journal replays any connector call that already completed instead of repeating it.`),
-    h(
-      "button",
-      {
-        class: "btn primary",
-        type: "button",
-        disabled: !session.can_act,
-        onclick: async (event) => {
-          event.currentTarget.disabled = true;
-          try {
-            replace(mainEl, renderIncident(await api.post(`/api/incidents/${encodeURIComponent(d.incident_id)}/recover`)));
-          } catch (error) {
-            replace(status, errorBox(error));
-          }
-        },
-      },
-      "Recover run",
-    ),
+    session.can_act ? recover : null,
     status,
   );
 }

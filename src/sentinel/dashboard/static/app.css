@@ -464,3 +464,5 @@ tr.row-good td { background: var(--good-bg); }
 /* The crosshair and hover dots exist only while the pointer is over the plot. */
 .chart-svg .crosshair, .chart-svg .dot { visibility: hidden; }
 .chart-holder.hovering .crosshair, .chart-holder.hovering .dot { visibility: visible; }
+
+.readonly-banner { padding: 8px 24px; background: var(--warn-bg); color: var(--warn); font-size: 0.9rem; border-bottom: 1px solid var(--border); }
