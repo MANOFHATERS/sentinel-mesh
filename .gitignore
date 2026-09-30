@@ -22,3 +22,7 @@ data/artifacts/evaluation.json
 # Real public data fetched by scripts/fetch_real_data.py (large, not redistributable here)
 data/real/*
 !data/real/.gitkeep
+
+# demo identity provider accounts (password hashes and TOTP secrets)
+data/dev-idp-accounts.json
+data/dev-idp-credentials.txt

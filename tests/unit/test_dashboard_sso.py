@@ -14,7 +14,7 @@ import json
 import re
 import time
 from types import SimpleNamespace
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import jwt
@@ -24,7 +24,14 @@ from fastapi.testclient import TestClient
 
 from sentinel.dashboard.app import create_app
 from sentinel.dashboard.auth import AuthError, Identity, Role, TokenRegistry
-from sentinel.dashboard.devidp import DemoUser, make_dev_idp
+from sentinel.dashboard.credentials import (
+    Account,
+    AccountStore,
+    hash_password,
+    new_totp_secret,
+    totp_code,
+)
+from sentinel.dashboard.devidp import DEMO_USERS, make_dev_idp
 from sentinel.dashboard.sso import (
     AuthAudit,
     Directory,
@@ -63,9 +70,48 @@ class Clock:
         return self.t
 
 
+PASSWORD = "correct horse battery staple"
+
+
+class IdpClock:
+    """The identity provider's clock, so a code can be used once per 30-second step in a test."""
+
+    def __init__(self) -> None:
+        self.t = 1_800_000_000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def known_store(templates=DEMO_USERS) -> AccountStore:
+    """The demo accounts, all with one known password (each hash has its own random salt)."""
+    return AccountStore(
+        [
+            Account(
+                username=t.email,
+                display=t.label,
+                groups=t.groups,
+                tenant=t.tenant,
+                password_hash=hash_password(PASSWORD),
+                totp_secret=new_totp_secret() if t.mfa else None,
+            )
+            for t in templates
+        ]
+    )
+
+
+def make_idp(store: AccountStore | None = None, clock: IdpClock | None = None):
+    store = store or known_store()
+    clock = clock or IdpClock()
+    idp = make_dev_idp(
+        issuer=ISSUER, client_id=CLIENT, redirect_uri=REDIRECT, accounts=store, now=clock
+    )
+    return idp, store, clock
+
+
 @pytest.fixture
 def stack():
-    idp = make_dev_idp(issuer=ISSUER, client_id=CLIENT, redirect_uri=REDIRECT)
+    idp, store, clock = make_idp()
     http = httpx.AsyncClient(transport=httpx.ASGITransport(app=idp), base_url=ISSUER)
     service = SsoService(config(), tenants=frozenset({"acme"}), scim_token=SCIM, http=http)
     tokens = TokenRegistry({MACHINE: Identity("ci-bot@acme.example", "acme", Role.VIEWER)})
@@ -74,22 +120,35 @@ def stack():
         TestClient(app, follow_redirects=False) as client,
         TestClient(idp, follow_redirects=False) as idp_client,
     ):
-        yield SimpleNamespace(app=client, idp=idp_client, service=service)
+        yield SimpleNamespace(app=client, idp=idp_client, service=service, store=store, clock=clock)
 
 
-def sign_in(stack, email: str) -> str:
-    """Drive the whole redirect dance for ``email``; returns the final Location."""
+def start_login(stack) -> str:
+    """Begin an SSO sign-in and return the identity provider's request id from its login page."""
     start = stack.app.get("/auth/login")
     assert start.status_code == 303
     authorize = urlparse(start.headers["location"])
     page = stack.idp.get(f"{authorize.path}?{authorize.query}")
-    assert page.status_code == 200
-    pick = re.search(
-        rf'href="[^"]*?/login\?([^"]*u={re.escape(quote(email))}[^"]*)"',
-        page.text.replace("&amp;", "&"),
+    assert page.status_code == 200 and 'name="password"' in page.text
+    return re.search(r'name="rid" value="([^"]+)"', page.text).group(1)
+
+
+def submit(stack, rid: str, email: str, password: str = PASSWORD, code: str | None = None):
+    """POST the credentials. ``code=None`` computes the right one for accounts that have MFA."""
+    account = stack.store.get(email)
+    stack.clock.t += 31  # a fresh time step: a code is single-use
+    if code is None and account is not None and account.totp_secret:
+        code = totp_code(account.totp_secret, at=stack.clock())
+    return stack.idp.post(
+        "/login", data={"rid": rid, "username": email, "password": password, "code": code or ""}
     )
-    assert pick, f"{email} not offered by the demo IdP"
-    back = stack.idp.get(f"/login?{pick.group(1)}")
+
+
+def sign_in(stack, email: str, password: str = PASSWORD, code: str | None = None) -> str:
+    """Drive the whole redirect dance with real credentials; returns the final Location."""
+    rid = start_login(stack)
+    back = submit(stack, rid, email, password, code)
+    assert back.status_code == 303, back.text[:200]
     callback = urlparse(back.headers["location"])
     done = stack.app.get(f"{callback.path}?{callback.query}")
     return done.headers["location"]
@@ -150,11 +209,9 @@ def test_handoff_code_is_single_use(stack):
 
 
 def test_a_replayed_callback_is_refused(stack):
-    start = stack.app.get("/auth/login")
-    authorize = urlparse(start.headers["location"])
-    page = stack.idp.get(f"{authorize.path}?{authorize.query}").text.replace("&amp;", "&")
-    pick = re.search(r'href="[^"]*?/login\?([^"]*maya[^"]*)"', page).group(1)
-    callback = urlparse(stack.idp.get(f"/login?{pick}").headers["location"])
+    rid = start_login(stack)
+    back = submit(stack, rid, "maya.analyst@acme.example")
+    callback = urlparse(back.headers["location"])
     first = stack.app.get(f"{callback.path}?{callback.query}")
     second = stack.app.get(f"{callback.path}?{callback.query}")
     assert "#sso=" in first.headers["location"]
@@ -513,7 +570,7 @@ def test_scim_requires_its_own_token(stack):
 
 
 def test_scim_is_off_when_no_token_is_configured():
-    idp = make_dev_idp(issuer=ISSUER, client_id=CLIENT, redirect_uri=REDIRECT)
+    idp, _store, _clock = make_idp()
     service = SsoService(
         config(),
         tenants=frozenset({"acme"}),
@@ -597,7 +654,7 @@ def test_scim_delete_deactivates_and_keeps_the_record(stack):
 
 
 def test_with_jit_off_only_provisioned_users_may_sign_in():
-    idp = make_dev_idp(issuer=ISSUER, client_id=CLIENT, redirect_uri=REDIRECT)
+    idp, store, clock = make_idp()
     http = httpx.AsyncClient(transport=httpx.ASGITransport(app=idp), base_url=ISSUER)
     service = SsoService(
         config(jit_provisioning=False), tenants=frozenset({"acme"}), scim_token=SCIM, http=http
@@ -607,7 +664,7 @@ def test_with_jit_off_only_provisioned_users_may_sign_in():
         TestClient(app, follow_redirects=False) as client,
         TestClient(idp, follow_redirects=False) as idp_client,
     ):
-        s = SimpleNamespace(app=client, idp=idp_client, service=service)
+        s = SimpleNamespace(app=client, idp=idp_client, service=service, store=store, clock=clock)
         assert sign_in(s, "maya.analyst@acme.example").endswith("deprovisioned")
         client.post(
             "/scim/v2/Users", headers=scim(), json={"userName": "maya.analyst@acme.example"}
@@ -681,33 +738,32 @@ def test_the_audit_api_is_disabled_without_sso():
 # --------------------------------------------------------------------------- #
 
 
+def authorize_params(challenge: str) -> dict[str, str]:
+    return {
+        "client_id": CLIENT,
+        "redirect_uri": REDIRECT,
+        "response_type": "code",
+        "state": "s",
+        "nonce": "n",
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    }
+
+
 def test_dev_idp_rejects_a_wrong_pkce_verifier_and_a_reused_code():
-    idp = make_dev_idp(
-        issuer=ISSUER,
-        client_id=CLIENT,
-        redirect_uri=REDIRECT,
-        users=(DemoUser("a@acme.example", "A", ("SOC-Analyst",)),),
-    )
+    idp, store, clock = make_idp()
+    stack = SimpleNamespace(idp=None, store=store, clock=clock)
     with TestClient(idp, follow_redirects=False) as c:
+        stack.idp = c
         challenge = (
             base64.urlsafe_b64encode(__import__("hashlib").sha256(b"v" * 50).digest())
             .rstrip(b"=")
             .decode()
         )
-        page = c.get(
-            "/authorize",
-            params={
-                "client_id": CLIENT,
-                "redirect_uri": REDIRECT,
-                "response_type": "code",
-                "state": "s",
-                "nonce": "n",
-                "code_challenge": challenge,
-                "code_challenge_method": "S256",
-            },
-        ).text
-        pick = re.search(r'/login\?([^"]+)"', page.replace("&amp;", "&")).group(1)
-        code = parse_qs(urlparse(c.get(f"/login?{pick}").headers["location"]).query)["code"][0]
+        page = c.get("/authorize", params=authorize_params(challenge)).text
+        rid = re.search(r'name="rid" value="([^"]+)"', page).group(1)
+        back = submit(stack, rid, "maya.analyst@acme.example")
+        code = parse_qs(urlparse(back.headers["location"]).query)["code"][0]
         bad = c.post(
             "/token",
             data={
@@ -730,3 +786,106 @@ def test_dev_idp_rejects_a_wrong_pkce_verifier_and_a_reused_code():
         )
         assert again.status_code == 400
         assert c.get("/authorize", params={"client_id": "other"}).status_code == 400
+
+
+# --------------------------------------------------------------------------- #
+# The identity provider's login: a real one
+# --------------------------------------------------------------------------- #
+
+
+def test_there_is_no_user_picker_and_no_sign_up(stack):
+    rid_page = stack.idp.get(
+        urlparse(stack.app.get("/auth/login").headers["location"]).path
+        + "?"
+        + urlparse(stack.app.get("/auth/login").headers["location"]).query
+    )
+    text = rid_page.text.lower()
+    assert "maya" not in text and "omar" not in text and "acme.example" not in text
+    assert "sign up" not in text and "register" not in text and "create account" not in text
+    assert stack.idp.get("/signup").status_code == 404 and stack.idp.post(
+        "/register"
+    ).status_code in (404, 405)
+
+
+def test_a_wrong_password_is_refused_and_says_nothing_about_which_part_was_wrong(stack):
+    rid = start_login(stack)
+    wrong_password = submit(stack, rid, "maya.analyst@acme.example", "not the password")
+    no_such_user = submit(stack, rid, "ghost@acme.example", PASSWORD)
+    for response in (wrong_password, no_such_user):
+        assert response.status_code == 401
+        assert "Incorrect username, password or authenticator code." in response.text
+    # the same message, so an attacker learns nothing about which accounts exist
+    assert wrong_password.text.replace("maya.analyst", "X") != ""
+    assert "ghost" in no_such_user.text  # only the username the person typed is echoed back
+
+
+def test_a_wrong_or_missing_authenticator_code_is_refused(stack):
+    rid = start_login(stack)
+    assert submit(stack, rid, "maya.analyst@acme.example", code="000000").status_code == 401
+    assert submit(stack, rid, "maya.analyst@acme.example", code="").status_code == 401
+    assert submit(stack, rid, "maya.analyst@acme.example", code="12ab56").status_code == 401
+
+
+def test_an_authenticator_code_cannot_be_used_twice(stack):
+    email = "maya.analyst@acme.example"
+    secret = stack.store.get(email).totp_secret
+    stack.clock.t += 31
+    code = totp_code(secret, at=stack.clock())
+    rid = start_login(stack)
+    first = stack.idp.post(
+        "/login", data={"rid": rid, "username": email, "password": PASSWORD, "code": code}
+    )
+    assert first.status_code == 303
+    rid2 = start_login(stack)
+    replay = stack.idp.post(
+        "/login", data={"rid": rid2, "username": email, "password": PASSWORD, "code": code}
+    )
+    assert replay.status_code == 401
+
+
+def test_five_failures_lock_the_account_even_for_the_right_password(stack):
+    email = "omar.auditor@acme.example"
+    rid = start_login(stack)
+    for _ in range(5):
+        assert submit(stack, rid, email, "guess").status_code == 401
+    locked = submit(stack, rid, email)  # now the correct credentials
+    assert locked.status_code == 429 and "Too many attempts" in locked.text
+    stack.clock.t += 301  # the lock expires
+    assert submit(stack, rid, email).status_code == 303
+
+
+def test_a_stale_or_unknown_sign_in_request_is_refused(stack):
+    response = stack.idp.post(
+        "/login",
+        data={"rid": "nope", "username": "maya.analyst@acme.example", "password": PASSWORD},
+    )
+    assert response.status_code == 400
+
+
+def test_the_login_page_allows_its_own_form_and_nothing_wider(stack):
+    start = stack.app.get("/auth/login")
+    authorize = urlparse(start.headers["location"])
+    page = stack.idp.get(f"{authorize.path}?{authorize.query}")
+    csp = page.headers["content-security-policy"]
+    assert "form-action 'self'" in csp and "script-src" not in csp and "unsafe-inline" not in csp
+    assert page.headers["cache-control"] == "no-store"
+
+
+def test_the_account_file_holds_hashes_and_secrets_but_never_a_password(tmp_path):
+    from sentinel.dashboard.devidp import provision_accounts
+
+    path = tmp_path / "accounts.json"
+    store, created = provision_accounts(path, DEMO_USERS)
+    text = path.read_text()
+    for password, _secret in created.values():
+        assert password not in text
+    assert text.count("scrypt$") == len(DEMO_USERS)
+    # a second start creates nothing new and keeps every password and enrolment
+    again, created_again = provision_accounts(path, DEMO_USERS)
+    assert created_again == {}
+    maya = "maya.analyst@acme.example"
+    assert again.get(maya).totp_secret == store.get(maya).totp_secret
+    from sentinel.dashboard.credentials import verify_password
+
+    assert verify_password(created[maya][0], again.get(maya).password_hash)
+    assert created["nina.nomfa@acme.example"][1] is None  # no second factor enrolled

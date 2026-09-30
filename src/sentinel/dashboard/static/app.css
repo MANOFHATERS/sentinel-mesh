@@ -602,3 +602,6 @@ tr.row-good td { background: var(--good-bg); }
 .mode-badge { margin-left: 10px; padding: 3px 9px; border-radius: 999px; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em; vertical-align: middle; }
 .mode-badge.real { background: var(--good-bg); color: var(--good); }
 .mode-badge.synthetic { background: var(--warn-bg); color: var(--warn); }
+
+.login .wide-input { flex: 0 0 auto; width: 100%; box-sizing: border-box; min-width: 0; }
+.login form, form.login { align-items: stretch; }

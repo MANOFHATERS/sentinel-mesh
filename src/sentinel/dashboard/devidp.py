@@ -5,9 +5,13 @@ Workspace plays in a deployment, so the dashboard's SSO can be exercised end to 
 laptop with no external account. It speaks the real protocol — discovery, JWKS,
 authorization-code with PKCE, RS256-signed ID tokens carrying ``groups`` and ``amr`` —
 so the relying party in :mod:`sentinel.dashboard.sso` is the same code that would face
-a real provider. Only the "log in" step is fake: instead of a password and MFA prompt it
-lists a few demo people, one of whom has no second factor and one of whom has no group,
-so the refusals can be shown as well as the successes.
+a real provider.
+
+The sign-in is a real one: a username, a password (stored as an scrypt hash) and, for accounts
+with a second factor, a six-digit code from an authenticator app, with per-account throttling
+and lockout (see :mod:`sentinel.dashboard.credentials`). There is no sign-up and no list of
+users: accounts exist only in the provider's store. Two accounts exist to show refusals — one
+with no second factor enrolled and one in no mapped group.
 
 Started only by ``python -m sentinel.dashboard --dev-idp``.
 """
@@ -21,19 +25,38 @@ import secrets
 import time
 from dataclasses import dataclass
 from html import escape
+from pathlib import Path
 from typing import Any, Final
 from urllib.parse import parse_qs, urlencode
 
 import jwt
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-__all__ = ["DEMO_USERS", "REAL_USERS", "DemoUser", "make_dev_idp"]
+from sentinel.dashboard.credentials import (
+    Account,
+    AccountStore,
+    LoginThrottle,
+    hash_password,
+    new_totp_secret,
+    verify_password,
+    verify_totp,
+)
+
+__all__ = [
+    "DEMO_USERS",
+    "REAL_USERS",
+    "DemoUser",
+    "make_dev_idp",
+    "provision_accounts",
+]
 
 
 @dataclass(frozen=True, slots=True)
 class DemoUser:
+    """A template for a demo account. Passwords are generated when the account is created."""
+
     email: str
     label: str
     groups: tuple[str, ...]
@@ -46,13 +69,13 @@ class DemoUser:
 REAL_USERS: Final[tuple[DemoUser, ...]] = (
     DemoUser(
         "real.analyst@acme.example",
-        "REAL DATA — SOC analyst (real capture, real ATT&CK; group SOC-Analyst, MFA)",
+        "Real-data SOC analyst (group SOC-Analyst, MFA)",
         ("SOC-Analyst",),
         tenant="real",
     ),
     DemoUser(
         "real.auditor@acme.example",
-        "REAL DATA — Auditor (read-only; group Auditor, MFA)",
+        "Real-data auditor, read-only (group Auditor, MFA)",
         ("Auditor",),
         tenant="real",
     ),
@@ -60,19 +83,52 @@ REAL_USERS: Final[tuple[DemoUser, ...]] = (
 
 DEMO_USERS: Final[tuple[DemoUser, ...]] = (
     DemoUser(
-        "maya.analyst@acme.example", "Maya — SOC analyst (group SOC-Analyst, MFA)", ("SOC-Analyst",)
+        "maya.analyst@acme.example", "Maya, SOC analyst (group SOC-Analyst, MFA)", ("SOC-Analyst",)
     ),
-    DemoUser("omar.auditor@acme.example", "Omar — Auditor (group Auditor, MFA)", ("Auditor",)),
+    DemoUser("omar.auditor@acme.example", "Omar, auditor (group Auditor, MFA)", ("Auditor",)),
     DemoUser(
         "nina.nomfa@acme.example",
-        "Nina — SOC analyst but signed in WITHOUT a second factor",
+        "Nina, SOC analyst with no second factor enrolled (refused by MFA policy)",
         ("SOC-Analyst",),
         mfa=False,
     ),
     DemoUser(
-        "carl.contractor@acme.example", "Carl — contractor, in no mapped group", ("Contractors",)
+        "carl.contractor@acme.example",
+        "Carl, contractor in no mapped group (refused: no role)",
+        ("Contractors",),
     ),
 )
+
+
+def provision_accounts(
+    path: Path, templates: tuple[DemoUser, ...]
+) -> tuple[AccountStore, dict[str, tuple[str, str | None]]]:
+    """Load the account store, creating any template account that is missing.
+
+    Returns the store and ``{username: (password, totp_secret)}`` for the accounts created *now*.
+    A password exists in plain text only in that return value (it is printed once by the server);
+    the file holds hashes and TOTP secrets, so a restart keeps every password and every
+    authenticator enrolment.
+    """
+    store = AccountStore.load(path) if path.is_file() else AccountStore([], path)
+    created: dict[str, tuple[str, str | None]] = {}
+    for template in templates:
+        if store.get(template.email) is not None:
+            continue
+        password = secrets.token_urlsafe(12)
+        secret = new_totp_secret() if template.mfa else None
+        store.add(
+            Account(
+                username=template.email,
+                display=template.label,
+                groups=template.groups,
+                tenant=template.tenant,
+                password_hash=hash_password(password),
+                totp_secret=secret,
+            )
+        )
+        created[template.email] = (password, secret)
+    return store, created
 
 
 def _b64url_uint(value: int) -> str:
@@ -80,13 +136,21 @@ def _b64url_uint(value: int) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
 
 
+_CSP: Final[str] = (
+    "default-src 'self'; style-src 'self'; img-src 'self' data:; base-uri 'none'; "
+    "object-src 'none'; frame-ancestors 'none'; form-action 'self'"
+)
+
+
 def make_dev_idp(
     *,
     issuer: str,
     client_id: str,
     redirect_uri: str,
-    users: tuple[DemoUser, ...] = DEMO_USERS,
+    accounts: AccountStore,
     client_secret: str | None = None,
+    throttle: LoginThrottle | None = None,
+    now: Any = time.time,
 ) -> FastAPI:
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     numbers = key.public_key().public_numbers()
@@ -99,12 +163,42 @@ def make_dev_idp(
         "n": _b64url_uint(numbers.n),
         "e": _b64url_uint(numbers.e),
     }
-    by_email = {u.email: u for u in users}
+    throttle = throttle or LoginThrottle(now=now)
     requests: dict[str, dict[str, str]] = {}
     codes: dict[str, dict[str, Any]] = {}
     base = issuer.rstrip("/")
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+    def page(rid: str, *, error: str = "", username: str = "", status: int = 200) -> Response:
+        message = f'<p class="alert tone-bad" role="alert">{escape(error)}</p>' if error else ""
+        html = (
+            '<!doctype html><meta charset="utf-8"><title>Sign in · demo identity provider</title>'
+            '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            '<link rel="stylesheet" href="/static/app.css">'
+            '<div class="login-wrap"><form class="login" method="post" '
+            f'action="{escape(base)}/login" autocomplete="off">'
+            "<h1>Sign in</h1>"
+            '<p class="sub">Demo identity provider, standing in for Okta or Azure AD. '
+            "There is no sign-up here: accounts are created by an administrator.</p>"
+            f'{message}<input type="hidden" name="rid" value="{escape(rid)}">'
+            '<label for="username">Username</label>'
+            '<input class="wide-input" id="username" name="username" type="email" required '
+            f'autocomplete="username" value="{escape(username)}" autofocus>'
+            '<label for="password">Password</label>'
+            '<input class="wide-input" id="password" name="password" type="password" required '
+            'autocomplete="current-password">'
+            '<label for="code">Authenticator code</label>'
+            '<input class="wide-input" id="code" name="code" inputmode="numeric" '
+            'pattern="[0-9 ]*" maxlength="7" placeholder="6 digits (if you have enrolled one)" '
+            'autocomplete="one-time-code">'
+            '<button class="btn primary" type="submit">Sign in</button></form></div>'
+        )
+        return HTMLResponse(
+            html,
+            status_code=status,
+            headers={"Content-Security-Policy": _CSP, "Cache-Control": "no-store"},
+        )
 
     @app.get("/.well-known/openid-configuration")
     def discovery() -> dict[str, Any]:
@@ -123,8 +217,8 @@ def make_dev_idp(
     def jwks() -> dict[str, Any]:
         return {"keys": [jwk]}
 
-    @app.get("/authorize", response_class=HTMLResponse)
-    def authorize(request: Request) -> HTMLResponse:
+    @app.get("/authorize")
+    def authorize(request: Request) -> Response:
         q = request.query_params
         if (
             q.get("client_id") != client_id
@@ -137,31 +231,63 @@ def make_dev_idp(
             return HTMLResponse("invalid authorization request", status_code=400)
         rid = secrets.token_urlsafe(16)
         requests[rid] = {k: q.get(k, "") for k in ("state", "nonce", "code_challenge")}
-        rows = "".join(
-            f'<li><a href="{base}/login?{urlencode({"rid": rid, "u": u.email})}">'
-            f"{escape(u.label)}</a></li>"
-            for u in users
-        )
-        page = (
-            '<!doctype html><meta charset="utf-8"><title>Demo identity provider</title>'
-            '<link rel="stylesheet" href="/static/app.css">'
-            '<div class="login-wrap"><div class="login"><h1>Demo identity provider</h1>'
-            '<p class="sub">Stands in for Okta / Azure AD for local demos. '
-            f"Pick who is signing in to Sentinel Mesh.</p><ul>{rows}</ul></div></div>"
-        )
-        return HTMLResponse(page)
+        return page(rid)
 
-    @app.get("/login")
-    def login(rid: str, u: str) -> RedirectResponse:
-        request = requests.pop(rid, None)
-        user = by_email.get(u)
-        if request is None or user is None:
-            return RedirectResponse(f"{redirect_uri}?error=access_denied", status_code=303)
+    @app.post("/login")
+    async def login(request: Request) -> Response:
+        parsed = parse_qs((await request.body()).decode("utf-8", "ignore"))
+        form = {k: v[0] for k, v in parsed.items()}
+        rid = form.get("rid", "")
+        username = form.get("username", "").strip()
+        if rid not in requests:
+            return HTMLResponse(
+                "This sign-in expired. Start again from the application.", status_code=400
+            )
+        wait = throttle.locked_for(username)
+        if wait > 0:
+            return page(
+                rid,
+                error=f"Too many attempts. Try again in {int(wait // 60) + 1} minute(s).",
+                username=username,
+                status=429,
+            )
+        account = accounts.get(username)
+        # The password is checked whether or not the account exists, and every failure reads the
+        # same, so neither the answer nor the timing says which part was wrong.
+        password_ok = verify_password(
+            form.get("password", ""), account.password_hash if account else None
+        )
+        step = None
+        if account is not None and password_ok and account.totp_secret:
+            step = verify_totp(
+                account.totp_secret,
+                form.get("code", ""),
+                at=now(),
+                last_step=account.last_totp_step,
+            )
+        good = account is not None and password_ok and (not account.totp_secret or step is not None)
+        if not good:
+            throttle.failure(username)
+            return page(
+                rid,
+                error="Incorrect username, password or authenticator code.",
+                username=username,
+                status=401,
+            )
+        assert account is not None
+        if step is not None:
+            accounts.use_totp_step(account, step)  # this code can never be used again
+        throttle.success(username)
+        entry = requests.pop(rid)
         code = secrets.token_urlsafe(24)
-        codes[code] = {**request, "user": user, "exp": time.time() + 60}
+        codes[code] = {
+            **entry,
+            "account": account,
+            "amr": ["pwd", "otp"] if account.totp_secret else ["pwd"],
+            "exp": time.time() + 60,
+        }
         return RedirectResponse(
-            f"{redirect_uri}?{urlencode({'code': code, 'state': request['state']})}",
-            status_code=303,
+            f"{redirect_uri}?{urlencode({'code': code, 'state': entry['state']})}", status_code=303
         )
 
     @app.post("/token")
@@ -185,20 +311,20 @@ def make_dev_idp(
         )
         if not hmac.compare_digest(challenge, entry["code_challenge"]):
             return JSONResponse({"error": "invalid_grant", "detail": "PKCE"}, status_code=400)
-        user: DemoUser = entry["user"]
-        now = int(time.time())
+        account: Account = entry["account"]
+        issued = int(time.time())
         claims = {
             "iss": base,
             "aud": client_id,
-            "sub": hashlib.sha256(user.email.encode()).hexdigest()[:16],
-            "iat": now,
-            "exp": now + 300,
+            "sub": hashlib.sha256(account.username.encode()).hexdigest()[:16],
+            "iat": issued,
+            "exp": issued + 300,
             "nonce": entry["nonce"],
-            "email": user.email,
+            "email": account.username,
             "email_verified": True,
-            "groups": list(user.groups),
-            "tenant": user.tenant,
-            "amr": ["pwd", "otp"] if user.mfa else ["pwd"],
+            "groups": list(account.groups),
+            "tenant": account.tenant,
+            "amr": entry["amr"],
         }
         id_token = jwt.encode(claims, key, algorithm="RS256", headers={"kid": kid})
         return JSONResponse({"id_token": id_token, "token_type": "Bearer", "expires_in": 300})

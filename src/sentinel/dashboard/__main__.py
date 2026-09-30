@@ -40,29 +40,61 @@ def _real_files(root: Path = Path(".")):
     return dataset, attack, label
 
 
+def _print_accounts(created: dict, *, real: bool) -> None:
+    """Show the demo identity provider's credentials once, when they are created."""
+    print("  demo identity provider: sign in with username + password + authenticator code")
+    if not created:
+        print("  accounts loaded from the account file; passwords were shown when they were")
+        print("  created. Codes and resets: python scripts/dev_idp_accounts.py --help")
+        return
+    print("  NEW ACCOUNTS created (passwords are written to a local file, not printed):")
+    for username, (_password, secret) in created.items():
+        mfa = "authenticator enrolled" if secret else "no second factor enrolled"
+        print(f"    {username:32s} {mfa}")
+    record = Path("data/dev-idp-credentials.txt")
+    record.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "Demo identity provider accounts (local demo only; git-ignored; safe to delete).",
+        "Passwords are stored only as hashes, so this file is the one place they can be read.",
+        "",
+    ]
+    for user, (pw, sec) in created.items():
+        lines += [user, f"  password: {pw}", f"  authenticator secret: {sec or '(none)'}"]
+    record.write_text(chr(10).join(lines) + chr(10), encoding="utf-8")
+    print(f"  the same details are in {record} (git-ignored)")
+    print("  add a secret to an authenticator app, or print the current code with")
+    print("  python scripts/dev_idp_accounts.py code <username>")
+    if real:
+        print("  real.* accounts open the workspace built from real public data")
+
+
 def _build_sso(args, public: str, tenants: frozenset[str], root: Path, *, real: bool = False):
-    """``(SsoService | None, dev IdP app | None)`` from flags and environment."""
+    """``(SsoService | None, dev IdP app | None, new demo credentials)`` from flags/environment."""
     from sentinel.dashboard.sso import AuthAudit, SsoConfig, SsoService
 
     env = os.environ
     redirect = f"{public}/auth/callback"
     scim = env.get("SENTINEL_SCIM_TOKEN")
     idp = None
+    created: dict = {}
     if args.dev_idp:
         from sentinel.dashboard.devidp import make_dev_idp
 
         issuer = f"{public}/devidp"
         client_id = "sentinel-mesh-dashboard"
-        from sentinel.dashboard.devidp import DEMO_USERS, REAL_USERS
+        from sentinel.dashboard.devidp import DEMO_USERS, REAL_USERS, provision_accounts
 
+        store, created = provision_accounts(
+            Path(env.get("SENTINEL_DEV_IDP_ACCOUNTS", "data/dev-idp-accounts.json")),
+            DEMO_USERS + REAL_USERS if real else DEMO_USERS,
+        )
         idp = make_dev_idp(
+            issuer=issuer, client_id=client_id, redirect_uri=redirect, accounts=store
+        )
+        config = SsoConfig(
             issuer=issuer,
             client_id=client_id,
             redirect_uri=redirect,
-            users=DEMO_USERS + REAL_USERS if real else DEMO_USERS,
-        )
-        config = SsoConfig(
-            issuer=issuer, client_id=client_id, redirect_uri=redirect,
             group_roles=SsoConfig.parse_group_roles("SOC-Analyst=analyst,Auditor=viewer"),
             default_tenant=sorted(tenants)[0],
             # The demo IdP lives in this process; discovery is fetched over loopback.
@@ -74,34 +106,45 @@ def _build_sso(args, public: str, tenants: frozenset[str], root: Path, *, real: 
             client_secret=env.get("SENTINEL_OIDC_CLIENT_SECRET"),
             redirect_uri=redirect,
             group_roles=SsoConfig.parse_group_roles(
-                env.get("SENTINEL_OIDC_GROUPS", "SOC-Analyst=analyst,Auditor=viewer")),
+                env.get("SENTINEL_OIDC_GROUPS", "SOC-Analyst=analyst,Auditor=viewer")
+            ),
             default_tenant=env.get("SENTINEL_OIDC_TENANT"),
         )
     else:
-        return None, None
+        return None, None, {}
     audit = AuthAudit(root / "auth-audit.jsonl")
-    return SsoService(config, tenants=tenants, scim_token=scim, audit=audit), idp
+    return SsoService(config, tenants=tenants, scim_token=scim, audit=audit), idp, created
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m sentinel.dashboard")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--workdir", type=Path, default=None,
-                        help="where the audit chain, checkpoints and journal live "
-                             "(default: a fresh temporary directory)")
-    parser.add_argument("--tenants", default="acme",
-                        help="comma-separated tenant ids, one workspace each")
+    parser.add_argument(
+        "--workdir",
+        type=Path,
+        default=None,
+        help="where the audit chain, checkpoints and journal live "
+        "(default: a fresh temporary directory)",
+    )
+    parser.add_argument(
+        "--tenants", default="acme", help="comma-separated tenant ids, one workspace each"
+    )
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--alerts", type=int, default=DEFAULT_ALERTS)
-    parser.add_argument("--public-url", default=None,
-                        help="the URL browsers use (default: http://HOST:PORT); the SSO "
-                             "redirect URI is derived from it")
-    parser.add_argument("--dev-idp", action="store_true",
-                        help="mount a demo OpenID Connect provider at /devidp and use it "
-                             "for SSO (local demos only)")
-    parser.add_argument("--evaluation", type=Path,
-                        default=Path("data/artifacts/evaluation.json"))
+    parser.add_argument(
+        "--public-url",
+        default=None,
+        help="the URL browsers use (default: http://HOST:PORT); the SSO "
+        "redirect URI is derived from it",
+    )
+    parser.add_argument(
+        "--dev-idp",
+        action="store_true",
+        help="mount a demo OpenID Connect provider at /devidp and use it "
+        "for SSO (local demos only)",
+    )
+    parser.add_argument("--evaluation", type=Path, default=Path("data/artifacts/evaluation.json"))
     args = parser.parse_args(argv)
 
     import uvicorn
@@ -147,7 +190,9 @@ def main(argv: list[str] | None = None) -> int:
         threading.Thread(target=build_real, name="real-workspace", daemon=True).start()
     public = (args.public_url or f"http://{args.host}:{args.port}").rstrip("/")
     sso_tenants = frozenset(tenants) | ({"real"} if real_files else frozenset())
-    sso, idp = _build_sso(args, public, sso_tenants, root, real=real_files is not None)
+    sso, idp, new_accounts = _build_sso(
+        args, public, sso_tenants, root, real=real_files is not None
+    )
     spec = os.environ.get("SENTINEL_DASHBOARD_TOKENS")
     if spec:
         tokens = TokenRegistry.parse(spec)
@@ -185,11 +230,7 @@ def main(argv: list[str] | None = None) -> int:
     if sso is not None:
         print("single sign-on is on; people sign in through the identity provider")
         if args.dev_idp:
-            print("  demo identity provider: maya.analyst@ (analyst), omar.auditor@ (viewer),")
-            print("  nina.nomfa@ (refused: no MFA), carl.contractor@ (refused: no group)")
-            if real_files:
-                print("  REAL DATA users: real.analyst@ (analyst), real.auditor@ (viewer) — the")
-                print("  whole dashboard shows the real capture and real ATT&CK for these two")
+            _print_accounts(new_accounts, real=real_files is not None)
         if os.environ.get("SENTINEL_SCIM_TOKEN"):
             print("  SCIM provisioning at /scim/v2/Users")
     print(f"open http://{args.host}:{args.port}/", flush=True)
