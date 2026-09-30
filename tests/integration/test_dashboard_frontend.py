@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+STATIC = ROOT / "src" / "sentinel" / "dashboard" / "static"
 JS_TESTS = sorted((ROOT / "tests" / "js").glob("*.test.mjs"))
 
 
@@ -30,3 +31,11 @@ def test_front_end_unit_tests_pass():
     )
     assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-4000:]
     assert "# fail 0" in result.stdout
+
+
+def test_the_sso_button_is_not_an_anchor_the_href_filter_would_strip():
+    # dom.js drops any href that is not "#/..." or absolute http(s), so a relative
+    # "/auth/login" anchor renders with no href and the button silently does nothing.
+    source = (STATIC / "js" / "app.js").read_text(encoding="utf-8")
+    assert 'href: "/auth/login"' not in source
+    assert 'window.location.assign("/auth/login")' in source

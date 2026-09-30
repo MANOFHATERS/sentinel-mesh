@@ -313,7 +313,9 @@ function renderLogin(message) {
       if (cfg.sso) {
         replace(
           ssoBox,
-          h("a", { class: "btn primary block", href: "/auth/login" }, "Sign in with SSO"),
+          // A button, not a link: safeHref (dom.js) only lets "#/" and absolute http(s) URLs become an
+          // href, so a relative "/auth/login" anchor would silently lose its href and do nothing.
+          h("button", { class: "btn primary block", type: "button", onclick: () => window.location.assign("/auth/login") }, "Sign in with SSO"),
           h("p", { class: "meta" }, cfg.mfa_required ? "Your organisation's identity provider signs you in, with MFA." : "Your organisation's identity provider signs you in."),
         );
       }
