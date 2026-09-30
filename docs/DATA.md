@@ -136,7 +136,12 @@ optional; the synthetic demo needs none of it.
 | A real repository | fetched at scan time from `codeload.github.com` for the URL you paste | 25 MB cap | memory only |
 
 `python scripts/fetch_real_data.py` lists these and downloads nothing without `--yes`; each file is
-checked (size and shape) before it is kept. CIC-IDS2017 works too (see above) but its official
+checked (size and shape) before it is kept. Beyond the two above it can also fetch: the **full
+UNSW-NB15** (one 106 MB Parquet shard with real IPs and capture times, from a public Hugging Face
+mirror), **CISA KEV** (1.8 MB), **FIRST EPSS** (2.7 MB) and **MITRE D3FEND** (4.8 MB). Two more things are
+built from free APIs, no key needed, and cached: `python scripts/build_real_supply_chain.py` (deps.dev and
+OSV.dev, about five minutes the first time) and `python scripts/build_scanner_eval.py` (GitHub's API; its
+unauthenticated limit of 60 requests an hour is enough, and `GITHUB_TOKEN` lifts it). CIC-IDS2017 works too (see above) but its official
 download is behind a form, so it is not fetched automatically; put its CSVs in
 `data/raw/cic-ids2017/`.
 

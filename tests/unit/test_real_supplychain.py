@@ -304,7 +304,21 @@ def mock_services(counter):
                     "summary": "Bad",
                     "published": "2020-02-01T00:00:00Z",
                     "database_specific": {"severity": "HIGH", "cwe_ids": ["CWE-79"]},
-                    "affected": [{"ranges": [{"events": [{"introduced": "0"}, {"fixed": "1.1"}]}]}],
+                    "affected": [
+                        {
+                            "package": {"ecosystem": "PyPI", "name": "oldlib"},
+                            "ranges": [
+                                {
+                                    "type": "ECOSYSTEM",
+                                    "events": [{"introduced": "0"}, {"fixed": "1.1"}],
+                                }
+                            ],
+                        },
+                        {
+                            "package": {"ecosystem": "Go", "name": "other"},
+                            "ranges": [{"type": "ECOSYSTEM", "events": [{"fixed": "9.9.9"}]}],
+                        },
+                    ],
                 },
             )
         return httpx.Response(404)
@@ -517,3 +531,21 @@ def test_real_launches_survive_a_restart(full_real_models, tmp_path):
         assert cards["code-scan"]["total"] == 1
     finally:
         again.close()
+
+
+def test_a_supply_chain_node_lists_its_real_issues_with_exploitation_data(workspace):
+    from fastapi.testclient import TestClient
+
+    from sentinel.dashboard.app import create_app
+    from sentinel.dashboard.auth import Identity, Role, TokenRegistry
+    from sentinel.dashboard.registry import WorkspaceRegistry
+
+    tokens = TokenRegistry({"v" * 30: Identity("v@acme.example", "real", Role.VIEWER)})
+    headers = {"Authorization": "Bearer " + "v" * 30}
+    with TestClient(create_app(WorkspaceRegistry({"real": workspace}), tokens)) as client:
+        node = client.get("/api/supply-chain/nodes/pypi:oldlib@1.0", headers=headers).json()
+        assert [i["id"] for i in node["issues"]].count("CVE-2020-0001") == 1
+        assert len(node["issues"]) == 4 and node["issues"][0]["fixed"] == ["9.9"]
+        clean = client.get("/api/supply-chain/nodes/pypi:midlib@2.0", headers=headers).json()
+        assert clean["issues"] == []
+        assert client.get("/api/real/grounding", headers=headers).status_code == 404  # no RealData

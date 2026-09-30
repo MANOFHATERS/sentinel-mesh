@@ -62,6 +62,7 @@ def advisory_slug(advisory_id: str) -> str:
 def real_scenarios(models: Any) -> list[RealScenario]:
     """The launchable real cases for a real :class:`MeshModels`."""
     dataset = (models.real_report or {}).get("dataset", "the real capture")
+    addressed = bool((models.real_report or {}).get("has_addresses"))
     out: list[RealScenario] = []
 
     families = Counter(
@@ -88,7 +89,10 @@ def real_scenarios(models: Any) -> list[RealScenario]:
                     "Triage scores each real flow and dismisses, monitors or escalates it.",
                     "Investigation cites MITRE's real ATT&CK entry where the family maps to one.",
                     "Containment proposes a response; a destructive one waits for your approval.",
-                    "This capture has no host addresses, so the asset is the flow record and "
+                    "The capture's real addresses are used: the victim host is the asset and a "
+                    "block targets the attacker's real IP; the action runs on the local emulators."
+                    if addressed
+                    else "This capture has no host addresses, so the asset is the flow record and "
                     "the action runs against the local emulators.",
                 ),
                 subject=family,

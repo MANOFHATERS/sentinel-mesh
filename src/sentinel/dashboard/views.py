@@ -451,6 +451,10 @@ def overview(workspace: Workspace) -> dict[str, Any]:
         "refusals": len(refusals),
         "feed_remaining": workspace.feed_remaining(),
         "scenarios": scenarios_view(workspace),
+        "data": {
+            "mode": workspace.models.mode,
+            "has_addresses": bool((workspace.models.real_report or {}).get("has_addresses")),
+        },
     }
 
 

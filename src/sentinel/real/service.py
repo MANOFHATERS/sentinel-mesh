@@ -104,6 +104,46 @@ class RealData:
             "curated_documents": curated_docs,
         }
 
+    def grounding(self) -> dict[str, Any]:
+        """The D3FEND mapping of the response actions, and the exploitation data on file."""
+        from sentinel.real.grounding import (
+            GroundingError,
+            countermeasures,
+            load_exploitation,
+            load_ontology,
+        )
+
+        base = self._root / "data" / "real"
+        try:
+            rows = countermeasures(load_ontology(base / "d3fend.json"))
+        except GroundingError:
+            rows = []
+        exploitation = load_exploitation(base)
+        return {
+            "available": bool(rows),
+            "countermeasures": rows,
+            "exploitation": None
+            if exploitation is None
+            else {
+                "kev_listed": len(exploitation.kev),
+                "epss_scored": len(exploitation.epss),
+                "epss_date": exploitation.epss_date,
+            },
+            "command": "python scripts/fetch_real_data.py --yes",
+        }
+
+    def scanner_quality(self) -> dict[str, Any]:
+        """The saved measurement of the scanner against real answer keys, if it has been run."""
+        from sentinel.real.scanner_eval import ScannerEvalError, load_result
+
+        try:
+            return {
+                "available": True,
+                **load_result(self._root / "data" / "real" / "scanner-eval.json"),
+            }
+        except ScannerEvalError:
+            return {"available": False, "command": "python scripts/build_scanner_eval.py"}
+
     # -- run handlers (called by the RunManager) ---------------------------------------- #
 
     def run_network(self, seed: int, params: dict[str, Any]) -> dict[str, Any]:

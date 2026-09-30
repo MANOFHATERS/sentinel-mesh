@@ -604,7 +604,7 @@ async function viewOverview() {
             "div",
             { class: "alert" },
             h("strong", {}, "This workspace runs on real public data. "),
-            `The alerts are real held-out network flows from ${session.dataset || "a public capture"}, scored by a triage model trained on the real training split; investigations cite MITRE's real ATT&CK catalogue; the supply chain is six real projects' pinned dependencies with their real known vulnerabilities; the code scan reads a real open-source project. This capture carries no host addresses, so the "asset" on an incident is the flow record itself, and a containment action against it runs on the local emulators.`,
+            `The alerts are real held-out network flows from ${session.dataset || "a public capture"}, scored by a triage model trained on the real training split; investigations cite MITRE's real ATT&CK catalogue; the supply chain is six real projects' pinned dependencies with their real known vulnerabilities; the code scan reads a real open-source project. ${overview.data && overview.data.has_addresses ? "The capture carries real source and destination addresses and capture times, so an incident's asset is the real victim host, a block targets the attacker's real IP, and the response runs on the local emulators." : "This capture carries no host addresses, so the asset on an incident is the flow record itself, and a containment action against it runs on the local emulators."}`,
           ),
           section("Launch a real case", h("div", { class: "cards" }, overview.scenarios.map((sc) => scenarioCard(sc, { compact: true })))),
         )
@@ -1179,6 +1179,26 @@ function nodePanel(node) {
       ["Breach history", String(node.features.breach_history)],
       ["Unmaintained", node.features.unmaintained ? "yes" : "no"],
     ]),
+    node.issues && node.issues.length
+      ? h(
+          "div",
+          { class: "stack tight" },
+          h("h3", {}, `Known vulnerabilities (${node.issues.length})`),
+          table(
+            ["Issue", "Severity", "Exploitation", "Fixed in"],
+            node.issues.map((i) =>
+              h(
+                "tr",
+                {},
+                h("td", {}, h("span", { title: i.summary }, i.id)),
+                h("td", {}, i.severity ? badge(i.severity === "CRITICAL" || i.severity === "HIGH" ? "failed" : "info", humanize(i.severity)) : "—"),
+                h("td", {}, i.kev ? badge("failed", "exploited in the wild") : Number.isFinite(i.epss) ? `EPSS ${fmtPercent(i.epss, 0)}` : "—"),
+                h("td", {}, i.fixed.length ? i.fixed.slice(0, 2).join(", ") : "—"),
+              ),
+            ),
+          ),
+        )
+      : null,
     h("h3", {}, `Exposure paths (${node.paths.length})${node.advisory_id ? ` within ${node.advisory_id}` : ""}`),
     node.paths.length
       ? h("ol", { class: "paths" }, node.paths.map((p) => h("li", {}, h("code", {}, p.nodes.join(" → ")), h("div", { class: "meta" }, `${p.hops} hop(s) · source ${p.source_cves} CVEs · contribution ${fmtNumber(p.contribution)}`))))
@@ -1190,7 +1210,8 @@ function nodePanel(node) {
 
 async function viewCodeScan() {
   if (isReal()) {
-    const [page, runs] = await Promise.all([viewCodeScanPrimary(), api.get("/api/runs")]);
+    const [page, runs, quality] = await Promise.all([viewCodeScanPrimary(), api.get("/api/runs"), api.get("/api/real/scanner-quality")]);
+    page.appendChild(scannerQualityPanel(quality));
     page.appendChild(realScanPanel(runs));
     const job = runs.jobs.real_scan;
     if (job && job.state === "done" && job.result) page.appendChild(realScanResult(job.result));
@@ -1466,6 +1487,7 @@ function regretPanel(curves) {
 
 async function viewModels() {
   const [m, runs] = await Promise.all([api.get("/api/models"), api.get("/api/runs")]);
+  const grounding = m.mode === "real" ? await api.get("/api/real/grounding") : null;
   const panel = runPanel(runs, {
     title: "Re-train live",
     intro: "Everything below was trained when the server started, under one seed. Re-train the autoencoder, the supply-chain GNN and the response policy now under a seed of your choice: a different seed giving similar numbers shows the results were not cherry-picked. The models serving the live incident flow are not replaced.",
@@ -1480,8 +1502,35 @@ async function viewModels() {
     h("h1", {}, "Models"),
     panel,
     live,
+    grounding ? groundingPanel(grounding) : null,
     h("h2", { class: "sub-h" }, m.mode === "real" ? "Trained for this workspace" : "Trained at server start-up"),
     ...modelsBody(m, { diffusion: m.mode !== "real" }),
+  );
+}
+
+function groundingPanel(g) {
+  const title = "Where the response actions come from";
+  if (!g.available) {
+    return section(title, h("p", { class: "meta" }, "The D3FEND catalogue is not on this machine yet."), h("p", {}, "Fetch it with ", h("code", {}, g.command), "."));
+  }
+  const rows = g.countermeasures.map((c) =>
+    h(
+      "tr",
+      {},
+      h("td", {}, humanize(c.action)),
+      h("td", {}, c.d3fend_id ? h("a", { href: c.url, target: "_blank", rel: "noopener noreferrer" }, `${c.d3fend_id} ${c.label}`) : "none: not a countermeasure"),
+      h("td", {}, c.tactic || "—"),
+      h("td", {}, c.definition || "A message to a person, or context gathering; it changes nothing on the affected system."),
+    ),
+  );
+  const x = g.exploitation;
+  return section(
+    title,
+    h("p", { class: "meta" }, "The response policy learns which action to choose from the project's own simulator; no public dataset records real analysts' decisions and their outcomes, so that part cannot be replaced with real experience. What real open sources do ground is what each action is. Each is mapped to the MITRE D3FEND defensive technique it implements (the mapping is written by hand and checked against the D3FEND ontology). The reward magnitudes the policy trains on are still ours."),
+    table(["Response action", "D3FEND technique", "Tactic", "What D3FEND says it is"], rows),
+    x
+      ? h("p", { class: "meta" }, `Supply-chain vulnerabilities are ranked by real exploitation data: ${fmtNumber(x.kev_listed, 0)} entries in CISA's Known Exploited Vulnerabilities catalogue and EPSS scores for ${fmtNumber(x.epss_scored, 0)} CVEs${x.epss_date ? ` (${x.epss_date.slice(0, 10)})` : ""}.`)
+      : h("p", { class: "meta" }, "CISA KEV and EPSS are not on this machine yet; advisories are ranked by severity and reach only."),
   );
 }
 
@@ -1682,6 +1731,52 @@ async function viewKb() {
   return h("div", { class: "stack" }, h("h1", {}, "Knowledge base"), realKbPanel(status));
 }
 
+function scannerQualityPanel(q) {
+  const title = "How good is this scanner on real code?";
+  if (!q.available) {
+    return section(title, h("p", { class: "meta" }, "Not measured yet on this machine. It runs the scanner against real answer keys (a real teaching project with paired vulnerable and fixed trees, and real advisories before and after their fixes)."), h("p", {}, "Measure it with ", h("code", {}, q.command), "."));
+  }
+  const ci = (pair) => `95% interval ${fmtPercent(pair[0], 0)}–${fmtPercent(pair[1], 0)}`;
+  const p = q.paired;
+  const a = q.advisories;
+  const cwe = Object.entries(a.by_cwe).map(([name, t]) => h("tr", {}, h("td", {}, name), h("td", { class: "num" }, String(t.cases)), h("td", { class: "num" }, `${t.hit} of ${t.cases}`)));
+  const rows = a.rows.map((r) =>
+    h(
+      "tr",
+      {},
+      h("td", {}, h("a", { href: r.commit, target: "_blank", rel: "noopener noreferrer" }, r.advisory)),
+      h("td", {}, r.package),
+      h("td", {}, r.cwe),
+      h("td", {}, badge(r.before_hit ? "completed" : "failed", r.before_hit ? "caught" : "missed")),
+      h("td", {}, r.after_hit ? badge("failed", "flagged again") : badge("completed", "clean")),
+      h("td", {}, r.summary),
+    ),
+  );
+  return section(
+    title,
+    h("p", { class: "meta" }, `Measured against answer keys nobody wrote for this scanner, on ${q.generated_at}. On the demo's own hand-written fixture it scores 18 of 18; this is what the same scanner does on real code.`),
+    h("h3", {}, `A real teaching project with paired vulnerable and fixed files — ${p.repository}`),
+    h(
+      "div",
+      { class: "tiles" },
+      statTile("Vulnerable files flagged", `${p.bad_flagged} of ${p.pairs}`, ci(p.recall_ci), p.recall >= 0.8 ? "good" : "warn"),
+      statTile("Fixed versions flagged (false alarms)", `${p.good_flagged} of ${p.pairs}`, ci(p.false_alarm_ci), p.false_alarm_rate > 0.1 ? "warn" : "good"),
+    ),
+    h("p", { class: "meta" }, p.note),
+    h("h3", {}, "Real advisories, scanned before and at their fix"),
+    h(
+      "div",
+      { class: "tiles" },
+      statTile("Caught before the fix", `${a.hit} of ${a.cases}`, ci(a.recall_ci), a.recall >= 0.8 ? "good" : "warn"),
+      statTile("Still flagged after the fix", `${a.fixed_version_flagged} of ${a.cases}`, ci(a.fixed_version_flagged_ci), "neutral"),
+      statTile("Caught, then clean after the fix", String(a.flagged_before_and_clean_after), "the scanner's finding disappears with the fix", "good"),
+    ),
+    h("p", { class: "meta" }, a.note),
+    table(["Weakness (CWE)", "Cases", "Caught"], cwe),
+    h("details", {}, h("summary", {}, `Every case (${a.rows.length})`), table(["Advisory", "Project", "CWE", "Before the fix", "After the fix", "What it was"], rows)),
+  );
+}
+
 function needFile(title, status, what) {
   return section(
     title,
@@ -1722,7 +1817,7 @@ function realNetworkResult(job, saved) {
   );
   return section(
     `Real-data result — ${r.file}, seed ${job.seed}, ${fmtNumber(job.elapsed_s, 0)} s`,
-    h("p", { class: "meta" }, `${fmtNumber(r.rows_in_file, 0)} flows in the file; ${fmtNumber(r.rows_sampled, 0)} sampled (${fmtPercent(r.attack_share)} attacks); train / validation / test split ${JSON.stringify(r.split)}.`),
+    h("p", { class: "meta" }, `${fmtNumber(r.rows_in_file, 0)} flows in the file; ${r.window ? `a contiguous run of ${fmtNumber(r.rows_sampled, 0)} from ${r.time_span.start.replace("T", " ").slice(0, 16)} to ${r.time_span.end.replace("T", " ").slice(11, 16)} UTC` : `${fmtNumber(r.rows_sampled, 0)} sampled`} (${fmtPercent(r.attack_share)} attacks); train / validation / test split ${JSON.stringify(r.split)}. ${r.has_addresses ? "Real IP addresses and capture times; session-context features included." : "No addresses or capture times in this file; per-flow features only."}`),
     table(["Metric", "Synthetic (saved report)", "Real (this run)"], rows.map(([name, a, b]) => h("tr", {}, h("td", {}, name), h("td", { class: "num" }, a), h("td", { class: "num" }, b)))),
     h("div", { class: "grid-2" }, families.length
       ? barChart({ title: "Recall by attack family (real flows)", categories: families.map(([name]) => name), series: [{ name: "Recall", values: families.map(([, f]) => f.recall) }], yMax: 1, percent: true, describe: "share of each family's held-out flows that reached an analyst" })

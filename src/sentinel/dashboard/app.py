@@ -352,7 +352,8 @@ def create_app(
         advisory: Annotated[str | None, Query(max_length=64)] = None,
     ) -> dict[str, Any]:
         explanation = ws.explain(node_id, advisory_id=advisory)
-        return {**views.node_view(explanation, ws.graph), "advisory_id": advisory}
+        issues = (ws.models.real_supply or {}).get("issues", {}).get(node_id, [])
+        return {**views.node_view(explanation, ws.graph), "advisory_id": advisory, "issues": issues}
 
     @app.get("/api/code-scan")
     def code_scan(ws: CodeWs) -> dict[str, Any]:
@@ -424,6 +425,18 @@ def create_app(
         if real is None:
             return {"enabled": False}
         return {"enabled": True, **real.status()}
+
+    @app.get("/api/real/grounding")
+    def real_grounding(_who: Who) -> dict[str, Any]:
+        if real is None:
+            raise NotFound("real data is not enabled on this server")
+        return real.grounding()
+
+    @app.get("/api/real/scanner-quality")
+    def real_scanner_quality(_who: Who) -> dict[str, Any]:
+        if real is None:
+            raise NotFound("real data is not enabled on this server")
+        return real.scanner_quality()
 
     @app.get("/api/real/kb/search")
     def real_kb_search(

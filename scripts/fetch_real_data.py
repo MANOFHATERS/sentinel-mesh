@@ -1,4 +1,4 @@
-"""Download the real public data the "Real data" page uses.
+"""Download the real public data the REAL DATA workspace uses.
 
 Nothing is downloaded unless ``--yes`` is given; without it the script only prints what it
 would fetch, from where, and how big it is. Each file is checked after it arrives (size and
@@ -15,6 +15,15 @@ network  UNSW_NB15_training-set.csv  ~32 MB   the UNSW-NB15 dataset (Australian 
          training partition       -> data/raw/unsw-nb15/
 attack   enterprise-attack.json      ~54 MB   MITRE ATT&CK for Enterprise as STIX 2.1, from
          github.com/mitre-attack/attack-stix-data   -> data/real/
+kev      known_exploited_vulnerabilities.json  ~3 MB   CISA's catalogue of vulnerabilities known
+         to be exploited in the wild (cisa.gov)      -> data/real/
+epss     epss_scores-current.csv.gz  ~6 MB   FIRST's daily probability that each CVE is exploited
+         (epss.empiricalsecurity.com)                -> data/real/
+d3fend   d3fend.json                 ~5 MB   MITRE D3FEND, the catalogue of defensive techniques
+         and the ATT&CK techniques they counter      -> data/real/
+flows    UNSW_NB15_full_shard2.parquet  ~106 MB   the full UNSW-NB15, one of two shards, with real
+         source and destination IPs and timestamps (a public Hugging Face mirror of the official
+         data)                                       -> data/raw/unsw-nb15/
 """
 
 from __future__ import annotations
@@ -39,6 +48,7 @@ class Asset:
     destination: Path
     expected_bytes: int
     description: str
+    min_bytes: int | None = None
 
 
 ASSETS = (
@@ -49,6 +59,40 @@ ASSETS = (
         ROOT / "data" / "raw" / "unsw-nb15",
         32_293_018,
         "UNSW-NB15 training partition (labelled network flows)",
+    ),
+    Asset(
+        "kev",
+        "known_exploited_vulnerabilities.json",
+        "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
+        ROOT / "data" / "real",
+        2_675_299,
+        "CISA Known Exploited Vulnerabilities catalogue",
+    ),
+    Asset(
+        "epss",
+        "epss_scores-current.csv.gz",
+        "https://epss.empiricalsecurity.com/epss_scores-current.csv.gz",
+        ROOT / "data" / "real",
+        6_000_000,
+        "FIRST EPSS: probability that each CVE is exploited in the next 30 days",
+        min_bytes=1_000_000,
+    ),
+    Asset(
+        "d3fend",
+        "d3fend.json",
+        "https://d3fend.mitre.org/ontologies/d3fend.json",
+        ROOT / "data" / "real",
+        4_833_645,
+        "MITRE D3FEND defensive-technique ontology",
+    ),
+    Asset(
+        "flows",
+        "UNSW_NB15_full_shard2.parquet",
+        "https://huggingface.co/datasets/Mouwiya/UNSW-NB15/resolve/main/data/"
+        "train-00001-of-00002.parquet",
+        ROOT / "data" / "raw" / "unsw-nb15",
+        105_596_940,
+        "UNSW-NB15, full flows with real IPs and timestamps (shard 2 of 2)",
     ),
     Asset(
         "attack",
@@ -65,8 +109,35 @@ ASSETS = (
 def validate(asset: Asset, path: Path) -> str | None:
     """A problem description, or ``None`` if the file looks right."""
     size = path.stat().st_size
-    if size < asset.expected_bytes * 0.5:
+    floor = asset.min_bytes if asset.min_bytes is not None else asset.expected_bytes * 0.5
+    if size < floor:
         return f"only {size:,} bytes; expected about {asset.expected_bytes:,}"
+    if asset.key == "kev":
+        try:
+            catalogue = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            return f"not valid JSON: {exc}"
+        if not catalogue.get("vulnerabilities"):
+            return "no vulnerabilities in the catalogue"
+        return None
+    if asset.key == "d3fend":
+        try:
+            ontology = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            return f"not valid JSON: {exc}"
+        return None if "@graph" in ontology else "not a JSON-LD ontology"
+    if asset.key == "epss":
+        import gzip
+
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            head = [handle.readline() for _ in range(3)]
+        return None if any(line.startswith("cve,epss") for line in head) else "not an EPSS file"
+    if asset.key == "flows":
+        import pyarrow.parquet as pq
+
+        names = set(pq.ParquetFile(path).schema_arrow.names)
+        need = {"srcip", "dstip", "Stime", "attack_cat", "label"}
+        return None if need <= names else f"missing columns {sorted(need - names)}"
     if asset.key == "attack":
         try:
             bundle = json.loads(path.read_text(encoding="utf-8"))

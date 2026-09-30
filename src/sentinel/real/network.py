@@ -34,11 +34,14 @@ from sentinel.core.errors import SentinelError
 from sentinel.core.schemas import Alert, TriageDecision
 from sentinel.ingest.normalizer import CICIDS2017Normalizer, Normalizer, UNSWNB15Normalizer
 
-__all__ = ["RealDataError", "analyse_flows", "detect_format", "find_dataset"]
+__all__ = ["RealDataError", "analyse_flows", "detect_format", "find_dataset", "has_addresses"]
 
 BENIGN: Final[str] = "benign"
 MIN_ROWS: Final[int] = 400
 _SEARCH_DIRS: Final[tuple[str, ...]] = ("data/raw/unsw-nb15", "data/raw/cic-ids2017", "data/raw")
+#: A file that carries real addresses and capture times is preferred over one that does not: it
+#: lets containment target a real host and lets the session-context features exist at all.
+_TARGET_ATTACK_SHARE: Final[float] = 0.35
 
 
 class RealDataError(SentinelError):
@@ -46,15 +49,17 @@ class RealDataError(SentinelError):
 
 
 def find_dataset(root: Path | str = ".") -> Path | None:
-    """The first real flow CSV found under the conventional ``data/raw`` folders."""
+    """A real flow file under the conventional ``data/raw`` folders: a Parquet file (which carries
+    real IPs and timestamps) if there is one, else the first CSV."""
     base = Path(root)
-    for folder in _SEARCH_DIRS:
-        directory = base / folder
-        if not directory.is_dir():
-            continue
-        for candidate in sorted(directory.glob("*.csv")):
-            if detect_format(candidate) is not None:
-                return candidate
+    for pattern in ("*.parquet", "*.csv"):
+        for folder in _SEARCH_DIRS:
+            directory = base / folder
+            if not directory.is_dir():
+                continue
+            for candidate in sorted(directory.glob(pattern)):
+                if detect_format(candidate) is not None:
+                    return candidate
     return None
 
 
@@ -69,8 +74,33 @@ def _open(path: Path):
     raise RealDataError(f"{path} is not readable as text")
 
 
+def _parquet_columns(path: Path) -> set[str]:
+    import pyarrow.parquet as pq
+
+    return {n.lower() for n in pq.ParquetFile(path).schema_arrow.names}
+
+
+def has_addresses(path: Path) -> bool:
+    """Does this file carry source/destination IPs and capture times?"""
+    try:
+        if path.suffix == ".parquet":
+            names = _parquet_columns(path)
+        else:
+            with _open(path) as handle:
+                names = {h.strip().lower() for h in next(csv.reader(handle), [])}
+    except (OSError, RealDataError, StopIteration, ValueError):
+        return False
+    return {"srcip", "dstip"} <= names or {"source ip", "destination ip"} <= names
+
+
 def detect_format(path: Path) -> str | None:
     """``"unsw"`` or ``"cic"`` from the header row, else ``None``."""
+    if path.suffix == ".parquet":
+        try:
+            names = _parquet_columns(path)
+        except (OSError, ValueError):
+            return None
+        return "unsw" if {"sbytes", "dbytes", "dur"} <= names else None
     try:
         with _open(path) as handle:
             header = next(csv.reader(handle), [])
@@ -88,6 +118,50 @@ def _normalizer(fmt: str) -> Normalizer:
     if fmt == "unsw":
         return UNSWNB15Normalizer(tenant_id="real", strict=False)
     return CICIDS2017Normalizer(tenant_id="real", strict=False)
+
+
+def _window_rows(
+    path: Path, limit: int
+) -> tuple[list[tuple[int, dict[str, Any]]], int, dict[str, Any]]:
+    """A contiguous window of ``limit`` rows of a Parquet capture, chosen deterministically.
+
+    Session-context features (what one host did in the last minute) only mean something on flows
+    that are next to each other in time, so this takes a *run* of the capture rather than a random
+    sample. Among the candidate runs it prefers one that contains many attack families and an
+    attack share near a third, because a run that happens to be all benign, or one campaign,
+    cannot train or test anything.
+    """
+    import numpy as np
+    import pyarrow.parquet as pq
+
+    pf = pq.ParquetFile(path)
+    total = pf.metadata.num_rows
+    meta = pf.read(columns=["label", "attack_cat"]).to_pandas()
+    labels = meta["label"].astype(int).to_numpy()
+    families = meta["attack_cat"].fillna("").astype(str).str.strip().str.lower().to_numpy()
+    limit = min(limit, total)
+    prefix = np.concatenate([[0], np.cumsum(labels)])
+    step = max(limit // 4, 1)
+    best: tuple[tuple[int, float], int] | None = None
+    for start in range(0, total - limit + 1, step):
+        share = (prefix[start + limit] - prefix[start]) / limit
+        kinds = len({f for f in families[start : start + limit] if f})
+        score = (min(kinds, 6), -abs(float(share) - _TARGET_ATTACK_SHARE))
+        if best is None or score > best[0]:
+            best = (score, start)
+    start = best[1] if best else 0
+    bounds = np.cumsum([0] + [pf.metadata.row_group(i).num_rows for i in range(pf.num_row_groups)])
+    first = int(np.searchsorted(bounds, start, side="right")) - 1
+    last = int(np.searchsorted(bounds, start + limit, side="left"))
+    table = pf.read_row_groups(list(range(first, min(last + 1, pf.num_row_groups))))
+    offset = start - int(bounds[first])
+    records = table.to_pylist()[offset : offset + limit]
+    rows = [
+        (start + i, {k: ("" if v is None else v) for k, v in record.items()})
+        for i, record in enumerate(records)
+    ]
+    detail = {"window_start_row": start, "window_rows": len(rows), "file_rows": total}
+    return rows, total, detail
 
 
 def _sample_rows(path: Path, limit: int, seed: int) -> tuple[list[tuple[int, dict[str, str]]], int]:
@@ -146,13 +220,26 @@ def _fit_and_evaluate(
     if not 1_000 <= limit <= 200_000:
         raise RealDataError("limit must be between 1,000 and 200,000 rows")
 
-    rows, total_rows = _sample_rows(file, limit, seed)
+    window: dict[str, Any] = {}
+    if file.suffix == ".parquet":
+        rows, total_rows, window = _window_rows(file, limit)
+    else:
+        rows, total_rows = _sample_rows(file, limit, seed)
     normalizer = _normalizer(fmt)
     alerts: list[Alert] = []
     for index, row in rows:
         alert = normalizer.normalize(row, row_index=index)
         if alert is not None:
             alerts.append(alert)
+    addressed = has_addresses(file)
+    if addressed:
+        # Real capture times: put the flows in the order they happened and compute what each
+        # source and destination had been doing over the previous minute, exactly as the
+        # synthetic path does (one enricher, strictly causal).
+        from sentinel.ingest.enrich import SessionContextEnricher
+
+        alerts.sort(key=lambda a: a.timestamp)
+        alerts = list(SessionContextEnricher().enrich_all(alerts))
     if len(alerts) < MIN_ROWS:
         raise RealDataError(f"only {len(alerts)} usable rows in {file.name}; need {MIN_ROWS}")
 
@@ -195,6 +282,14 @@ def _fit_and_evaluate(
         "rows_sampled": len(alerts),
         "rows_rejected": len(rows) - len(alerts),
         "attack_share": float(labels.mean()),
+        "has_addresses": addressed,
+        "window": window or None,
+        "time_span": {
+            "start": min(a.timestamp for a in alerts).isoformat(),
+            "end": max(a.timestamp for a in alerts).isoformat(),
+        }
+        if addressed
+        else None,
         "split": split.sizes,
         "test_flows": len(test),
         "metrics": {
@@ -217,10 +312,12 @@ def _fit_and_evaluate(
         "seconds": round(time.perf_counter() - started, 1),
         "notes": [
             "Real, public, labelled network flows; not generated by this project.",
-            "Per-flow detection only: the train/test CSVs have no capture timestamps, so no "
-            "session-context features exist for this data."
-            if fmt == "unsw"
-            else "Session-context features are not computed in this run.",
+            "Real source and destination addresses and capture times: the flows are a contiguous "
+            "run of one day's capture, and the session-context features (what a host did in the "
+            "previous minute) are computed over it by the same enricher the synthetic path uses."
+            if addressed
+            else "Per-flow detection only: this file has no capture times or addresses, so no "
+            "session-context features exist for it.",
             "The test split was never seen by the fit or the calibration.",
         ],
     }

@@ -389,6 +389,8 @@ def model_report(models, *, policy: ServingPolicy | None = None) -> dict[str, An
         else {
             "truth": supply["truth"],
             "sources": supply["sources"],
+            "exploited_in_the_wild": supply.get("exploited_in_the_wild"),
+            "epss_date": supply.get("epss_date"),
             "generated_at": supply["generated_at"],
             "projects": supply["projects"],
             "cycle_edges_cut": supply["cycle_edges_cut"],

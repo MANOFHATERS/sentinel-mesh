@@ -1485,7 +1485,7 @@ The honest reading: the detector still catches almost every attack on real traff
 attack from benign far less cleanly than the synthetic corpus suggests (AUC 0.77, and about a quarter
 of benign flows are flagged). That is what real data does to a model tuned on generated data.
 
-### Limits, stated plainly
+### Limits at the end of Part 5.6 (all four were then worked on; see Part 5.7)
 
 * **The UNSW train/test CSV has no IP addresses and no timestamps.** The "asset" on a real incident is
   the flow record (`unsw-flow-N`), a containment action against it is simulated on the local emulators,
@@ -1498,6 +1498,44 @@ of benign flows are flagged). That is what real data does to a model tuned on ge
 * **A real repository has no answer key**, so the scanner's recall and false-positive rate are unknown
   there; only its findings are shown.
 * The real workspace's alert reduction is low because this partition is 68% attacks.
+
+## Part 5.7 — closing the limits: real addresses, a real supply chain, a scanner answer key ✅ COMPLETE
+
+Part 5.6 ended with four stated limits. Each was worked on with free, open sources. Code in
+`sentinel/real/` (`supplychain`, `scenarios`, `scanner_eval`, `grounding`, `network`), a real login in
+[dashboard/credentials.py](../src/sentinel/dashboard/credentials.py) and
+[dashboard/devidp.py](../src/sentinel/dashboard/devidp.py).
+
+| Limit | What was done | Outcome |
+|---|---|---|
+| **No IPs or timestamps** | The full UNSW-NB15 (a 1.14M-flow shard, one day in Feb 2015, real IPs and capture times). A contiguous window is chosen (session context needs real time order), flows are sorted by time and enriched by the same causal enricher the synthetic path uses. Containment now targets real hosts: an incident's asset is the victim (`149.171.126.x`), a block targets the attacker's real IP. | ROC-AUC **0.981**, recall 0.987, precision 0.948, alert reduction 59.7%, on 6,369 held-out flows. The same model on the address-less file: 0.769. Session context was the difference. |
+| **No real supply chain** | Six public projects' pinned lockfiles (pygoat, dvpwa, awx, superset, lemur, netbox) -> 483 nodes, 856 edges; declared dependencies and release dates from deps.dev; every known vulnerability from OSV.dev (deduplicated across GHSA/CVE/PYSEC aliases); CISA KEV and FIRST EPSS attached. The exposure rule of the synthetic benchmark (`label_ground_truth`, now public) labels it; a GNN is trained on it. | 10 intrinsic + 5 inherited high-risk nodes (`django 4.2`: 50 known issues, `aiohttp 3.5.3`: 45, `pillow 9.4.0`, `cryptography 39.0.1` ...). GNN top-10 precision **0.4** vs features-only **0.3**, on 144 test nodes with only 15 positives: a thin benchmark, and the graph's edge is not established. "Days since update" here is the age of the pinned version. |
+| **Policy trained on a simulator** | Cannot be fully fixed: no public dataset of real analyst decisions and outcomes exists. Grounded what can be: each response action is mapped to its MITRE D3FEND technique (hand-written, verified against the ontology at load); advisories are ranked by CISA KEV then EPSS. | The reward magnitudes are still ours, stated on the Models page. |
+| **Scanner has no answer key** | Two real keys: a teaching project with paired `bad/` and `good/` trees, and 25 real PyPI advisories whose CWE the scanner covers, scanned as the code was just before and at the fix commit. | Teaching project: **4 of 14** vulnerable files flagged, **4 of 14** fixed files flagged (both 95% CI 12-55%). Advisories: **4 of 25** caught before the fix (CI 6-35%), 3 still flagged after. These are library-internal flaws (Django's ORM, pip path handling), harder than application code. The demo fixture's 18/18 was measured on code written with the rules. |
+
+Also: the real workspace now has every page (Scenarios with real launchable cases, Supply chain, Code scan
+with a draft PR, Models, Knowledge base, Evaluation); a page appears only if real data backs it.
+
+### Findings during Part 5.7
+
+1. **A blanket `ruff format src` reformatted 68 files I never meant to touch.** Restored from git; the
+   nine files actually edited keep the formatting.
+2. **My own registry raised on `"real" in registry`** while the workspace was still preparing. Found by a test.
+3. **`load_ontology` crashed with a `TypeError` on a JSON file that was not an object.** Found by a test.
+4. **The "fixed in" versions mixed ecosystems** (one advisory names the same flaw in a C library and its Go
+   and Rust bindings). Restricted to the PyPI package's own ranges.
+5. **A login form that reused a flex-sizing class rendered 340 px tall inputs.** Caught by looking at it.
+
+### Limits that remain
+
+* **The response policy is still trained on the project's simulator.**
+* **The real supply chain is Python only and six projects.** A different real graph could rank differently.
+* **The scanner's answer keys are small** (14 and 25), and library flaws are not application flaws; the
+  intervals are wide.
+* **No real Wazuh, GitHub, SCIM or Slack** is contacted; the connectors run on local emulators.
+* **The identity provider is a stand-in.** Sessions, the SCIM directory and the audit chains are in memory.
+* **The UNSW capture is a testbed** (a synthetic-traffic generator produced its benign flows and a tool its
+  attacks), so it is real in provenance, not "production traffic".
 
 ## Running what exists
 

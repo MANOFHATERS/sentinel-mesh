@@ -306,11 +306,15 @@ class MeshModels:
         from sentinel.real.network import train_real
 
         model, test, report = train_real(dataset_path, limit=limit, seed=seed)
-        # The capture is stored in stretches of one kind of traffic; streamed in file order the
-        # first minutes of the feed would be all benign or all attack. A seeded shuffle
-        # interleaves them the way a mixed feed arrives, reproducibly.
         feed = list(test)
-        random.Random(seed).shuffle(feed)
+        if report.get("has_addresses"):
+            # Real capture times: stream the flows in the order they happened, bursts and all.
+            feed.sort(key=lambda a: a.timestamp)
+        else:
+            # A file without times is stored in stretches of one kind of traffic; streamed in
+            # file order the first minutes of the feed would be all benign or all attack. A
+            # seeded shuffle interleaves them the way a mixed feed arrives, reproducibly.
+            random.Random(seed).shuffle(feed)
         extra: dict[str, Any] = {}
         if supply_chain_path is not None and Path(supply_chain_path).is_file():
             extra.update(cls._real_supply_chain(Path(supply_chain_path), seed=seed))
@@ -350,6 +354,13 @@ class MeshModels:
         gnn = SupplyChainGNN(random_state=seed).fit(
             graph, labels, split, exposure=truth.risk_vector(node_ids)
         )
+        from sentinel.real.grounding import load_exploitation
+        from sentinel.real.supplychain import annotate_exploitation
+
+        exploitation = load_exploitation(path.parent)
+        if exploitation is not None:
+            facts["exploited_in_the_wild"] = annotate_exploitation(facts, exploitation)
+            facts["epss_date"] = exploitation.epss_date
         advisories = real_advisories(graph, facts)
         facts = {
             **facts,

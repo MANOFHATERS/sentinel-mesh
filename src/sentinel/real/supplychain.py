@@ -276,8 +276,13 @@ def build_snapshot(
 def _compact(record: Mapping[str, Any]) -> dict[str, Any]:
     fixed: list[str] = []
     for affected in record.get("affected", []):
+        # One advisory can name the same flaw in several ecosystems (a C library and the Go and
+        # Rust bindings that bundle it); only the PyPI package's own fixed versions belong here.
+        if (affected.get("package") or {}).get("ecosystem") != "PyPI":
+            continue
         for rng in affected.get("ranges", []):
-            fixed += [e["fixed"] for e in rng.get("events", []) if "fixed" in e]
+            if rng.get("type") == "ECOSYSTEM":
+                fixed += [e["fixed"] for e in rng.get("events", []) if "fixed" in e]
     specific = record.get("database_specific", {}) or {}
     return {
         "aliases": sorted(record.get("aliases", [])),
@@ -497,21 +502,60 @@ _SEVERITY_ORDER: Final[dict[str, int]] = {
 }
 
 
+def annotate_exploitation(facts: dict[str, Any], exploitation: Any) -> int:
+    """Attach CISA KEV membership and EPSS scores to every issue that has a CVE id. Returns how
+    many issues were listed as exploited in the wild."""
+    listed = 0
+    for issues in facts["issues"].values():
+        for issue in issues:
+            cves = [
+                c
+                for c in (issue["id"], *[r for r in issue["records"] if r.startswith("CVE-")])
+                if c.startswith("CVE-")
+            ]
+            best: dict[str, Any] = {}
+            for cve in cves:
+                info = exploitation.of(cve)
+                if "kev" in info or info.get("epss", 0) > best.get("epss", -1):
+                    best = {**best, **info}
+            issue.update(best)
+            listed += "kev" in best
+    return listed
+
+
+def _urgency(issue: Mapping[str, Any]) -> tuple[int, float, int]:
+    """Known exploited first, then estimated likelihood of exploitation, then severity."""
+    return (
+        1 if issue.get("kev") else 0,
+        float(issue.get("epss") or 0.0),
+        _SEVERITY_ORDER.get(issue.get("severity") or "", 0),
+    )
+
+
 def real_advisories(
     graph: SupplyChainGraph, facts: Mapping[str, Any], *, limit: int = 6
 ) -> dict[str, RealAdvisory]:
-    """One real advisory per package that most needs reviewing: the worst issue on packages that
-    carry at least four known issues, most-depended-on first. Deterministic."""
+    """One real advisory per package that most needs reviewing.
+
+    Packages that carry at least four known issues, ranked by how urgent their worst issue is
+    (listed as exploited in the wild, then EPSS, then severity when those are known) and then by
+    how much depends on them. Deterministic."""
     dependents = {
         n.node_id: len(graph.downstream(n.node_id, max_hops=4))
         for n in graph.nodes
         if n.kind is NodeKind.PACKAGE and n.cve_exposure_count >= 4
     }
-    ranked = sorted(dependents, key=lambda pid: (-dependents[pid], pid))[:limit]
+
+    def rank(pid: str) -> tuple[Any, ...]:
+        worst = max(facts["issues"][pid], key=lambda i: (_urgency(i), i["id"]))
+        kev, epss, _severity = _urgency(worst)
+        return (-kev, -epss, -dependents[pid], pid)
+
+    ranked = sorted(dependents, key=rank)[:limit]
     out: dict[str, RealAdvisory] = {}
     for pid in ranked:
         issues = facts["issues"][pid]
-        worst = max(issues, key=lambda i: (_SEVERITY_ORDER.get(i["severity"] or "", 0), i["id"]))
+        worst = max(issues, key=lambda i: (_urgency(i), i["id"]))
         cves = tuple(i["id"] for i in issues if i["id"].startswith("CVE-"))[:8]
         node = graph.node(pid)
         out[worst["id"]] = RealAdvisory(
@@ -523,6 +567,18 @@ def real_advisories(
                 f"{len(issues)} known vulnerabilities affect the pinned version {node.name}"
                 f"; the most severe is {worst['id']} ({worst['severity'] or 'unrated'})."
                 + (f" Fixed in {', '.join(worst['fixed'])}." if worst["fixed"] else "")
+                + (
+                    f" It is on CISA's list of vulnerabilities exploited in the wild "
+                    f"(added {worst['kev']['added']})."
+                    if worst.get("kev")
+                    else ""
+                )
+                + (
+                    f" EPSS estimates a {worst['epss']:.0%} chance of exploitation in the"
+                    " next 30 days."
+                    if worst.get("epss") is not None
+                    else ""
+                )
             ),
             cve_ids=cves,
         )
