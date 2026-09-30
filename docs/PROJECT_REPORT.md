@@ -109,8 +109,8 @@ The browser still uses a bearer header (no cookie, so no CSRF surface); the toke
 
 ### Part 5.4 — Live feed and live runs *(built in this working session)*
 - **Live feed:** an analyst-only toggle streams held-out alerts through the incident graph (4 every 2 s), so the Overview counters and the approval queue move on their own.
-- **Live runs:** the Models and Evaluation pages open on saved results; an analyst can re-train the models under any seed (~12 s), run a quick evaluation (~18 s) or the full evaluation (~3 min) and see the result beside the saved one. One run at a time, cancellable, and evaluations run as a subprocess of the one pipeline so the saved report is never overwritten.
-- **Two findings:** a crash-recovery experiment that only worked for some seeds (fixed), and agent-layer checks that are seed-sensitive because they drive a head slice of the test split (documented; the Full run is pinned to the published seed).
+- **Live runs:** the Models and Evaluation pages open on saved results; an analyst can re-train the models under any seed (~12 s), run a quick evaluation (~18 s) or the full evaluation (~2.5 min) and see the result beside the saved one. One run at a time, cancellable, and evaluations run as a subprocess of the one pipeline so the saved report is never overwritten.
+- **Two findings, both fixed:** a crash-recovery experiment that only worked for some seeds, and agent-layer checks that drove the *first* N flows of the test split (under seed 7 almost all benign, so three gates failed). They now sample evenly across the split; the full evaluation passes every gate under seed 7 and under the published seed.
 
 ---
 
@@ -124,7 +124,7 @@ All from one command: `python scripts/evaluate.py --n 20000 --cross-dataset --gr
 | F-02 | Triage agreement ≥ 85% | **0.9921** |
 | F-03 | Detector ROC-AUC ≥ 0.90 | **0.9971** (cross-dataset UNSW 0.9969) |
 | F-04 | Pause/resume at any node | Asserted at **every** node, hash-identical to an uninterrupted run |
-| F-05 | Every claim cited | 0 uncited, 0 unresolvable over 82 reports |
+| F-05 | Every claim cited | 0 uncited, 0 unresolvable over 50 reports |
 | F-06 | Supply-chain top-10 precision ≥ 0.80 | **0.80** (mean of 10 seeds; met, not comfortably); 10/10 flagged nodes explained by a path |
 | F-07 | ≥3 seeded vulns + valid patch PRs | **18/18** found, **0** false positives on 18 controls, **15** validated patches |
 | F-08 | Zero ungated executions | **0** on all three graphs; **0** requests on the wire before approval |
@@ -133,7 +133,7 @@ All from one command: `python scripts/evaluate.py --n 20000 --cross-dataset --gr
 | F-11 | Tamper detection < 1 s | 50,000 rows sub-second, every tamper class detected |
 | F-12 | Report from the demo pipeline | One `evaluate.py`, no separate path |
 | §9.1 | ≥60% fewer alerts to humans | **88.9%** at a 1% attack rate; 76.7% measured at triage |
-| §9.1 | MTTD < 30 s, MTTC < 3 min | **0.04 s** / **12.17 s** worst case |
+| §9.1 | MTTD < 30 s, MTTC < 3 min | **0.03 s** / **12.12 s** worst case |
 | §5.7 | Connectors least-privilege | 11/11 out-of-scope probes refused before the wire |
 
 ---
@@ -174,9 +174,8 @@ python -m sentinel.dashboard --dev-idp   # single sign-on via the demo identity 
 - **No LLM has been called.** `AnthropicEngine` is written and tested against a fake transport, but every number was produced with `NullEngine`. The quality a model adds to narratives is unmeasured.
 - **No real external service has been contacted.** Connectors are real HTTP clients tested against strict local emulators; F-14 is post-sprint by the PRD.
 - **SSO has only been tested against the built-in demo provider.** A real Okta / Azure AD tenant is three settings away but untried. Sessions, the SCIM directory and the sign-in log are in memory (a restart signs everyone out); a group change applies at the next sign-in.
-- **The full evaluation is seed-sensitive in its agent-layer checks** (they drive the first 200–400 flows of the test split; under some seeds almost none escalate, so three gates fail). Published numbers use seed 20260928; the dashboard's Full run is pinned to it.
 - **F-06 sits on its bar** (0.80 vs 0.80; per-seed 0.60–0.90). Rank correlation (0.65) is the steadier figure.
-- **F-07 is a measurement on a 261-line fixture**, not a false-positive rate on a production codebase.
+- **F-07 is a measurement on a 268-line fixture**, not a false-positive rate on a production codebase.
 - **The supply-chain graph is synthetic** (PRD §5.5.3), so the Supply-Chain Agent drafts no manifest edit; that needs CycloneDX ingestion.
 - **`mypy --strict` has not been run** (not installed in the build environment).
 - **One timing test** (F-11's 50k-row verification) can exceed its budget under heavy parallel load.

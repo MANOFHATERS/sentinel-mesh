@@ -1404,7 +1404,7 @@ so a reader can watch the numbers produced instead of taking them on trust. Code
 |---|---|---|
 | **Re-train** (Models) | Trains the autoencoder, the GNN and the response policy again under a chosen seed, in-process, and shows them next to the start-up run. **Never replaces the models serving the live flow** | ~12 s |
 | **Quick run** (Evaluation) | `scripts/evaluate.py` on 5,000 alerts: detector, supply-chain graph, knowledge base, response policy; chosen seed | ~18 s |
-| **Full run** (Evaluation) | The complete evaluation, every gate, all five agents, connectors and the dashboard end to end; always the published seed | ~3 min |
+| **Full run** (Evaluation) | The complete evaluation, every gate, all five agents, connectors and the dashboard end to end; chosen seed | ~2.5 min |
 
 Design points: one run at a time (a second start is refused with 409, and a run can be
 cancelled); the evaluations run as a **subprocess of the one pipeline** (PRD §9.3), writing
@@ -1419,13 +1419,18 @@ writes it); the only user value reaching a command line is an integer seed.
 2. **The full evaluation crashed for some seeds.** The crash-recovery experiment needed a
    gated incident among the first 300 flows, and under seed 7 there were none. It now
    searches the whole test split.
-3. **The agent-layer checks are seed-sensitive, and this is a known limitation, not fixed.**
-   Under seed 7 the first 200 flows of the test split are almost all benign (198 dismissed),
-   so nothing reaches the approval gate and three gates fail (F-04 interrupt/resume, §9.1
-   MTTC, connector F-08 wire) — not because triage is worse (its recall under seed 7 is
-   0.993) but because the check drives a head slice rather than a sample. Fixing it changes
-   every published agent number, so the **Full run is pinned to the published seed 20260928**;
-   Quick and Re-train accept any seed (Quick under seed 7: 4/4 gates).
+3. **The agent-layer checks drove the *first* N flows of the test split, and under some
+   seeds those are almost all benign.** Under seed 7, 198 of the first 200 were dismissed, so
+   nothing reached the approval gate and three gates failed (F-04 interrupt/resume, §9.1
+   MTTC, connector F-08 wire) — not because triage was worse (its recall under seed 7 is
+   0.993) but because a head slice is a sample of one stretch of the timeline. Both drivers
+   (`--agents`, `--connectors`) now take an **evenly spaced sample** across the split
+   (`_spread` in `scripts/evaluate.py`). The full evaluation now passes every gate under seed 7
+   *and* the published seed 20260928. The agent-layer counts moved accordingly (see the README
+   block: 200 incidents, 150 dismissed, 35 at the gate, 50 completed, 50 reports; MTTC worst
+   12.12 s; connectors 29 gated); the detector, graph, knowledge-base, code-scan and policy
+   numbers are unchanged. Earlier parts' ledger blocks above keep the numbers they were
+   measured with at the time.
 
 ## Running what exists
 

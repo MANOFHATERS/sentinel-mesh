@@ -1314,7 +1314,7 @@ async function viewEvaluation() {
     intro: "The report below is the saved result. To watch the numbers being produced instead, run the same evaluation pipeline now. A live run never overwrites the saved report; it appears next to it.",
     kinds: [
       { kind: "eval_quick", label: "Quick run", hint: "5,000 alerts · detector, supply-chain graph, knowledge base, response policy · about 20 seconds · uses the seed above" },
-      { kind: "eval_full", label: "Full run", fixedSeed: 20260928, hint: "20,000 alerts · every gate, all five agents, connectors and this dashboard end to end · about 3 minutes · always the published seed 20260928, so it reproduces the saved report" },
+      { kind: "eval_full", label: "Full run", hint: "20,000 alerts · every gate, all five agents, connectors and this dashboard end to end · about 2.5 minutes · seed 20260928 reproduces the saved report" },
     ],
     seed: true,
   });

@@ -704,6 +704,20 @@ def run_augmentation(*, n: int, seed: int) -> dict[str, Any]:
     }
 
 
+def _spread(items: list[Any], count: int) -> list[Any]:
+    """``count`` items spread evenly across ``items``, in order.
+
+    The agent-layer checks drive a bounded number of incidents. Taking the *first* N of a
+    test split is a sample of one stretch of the timeline, and under some seeds that
+    stretch is almost all benign: nothing reaches the approval gate, and the gate,
+    resume and timing checks fail for a reason that has nothing to do with the system.
+    An evenly spaced sample covers the whole split, deterministically.
+    """
+    if count >= len(items):
+        return list(items)
+    return [items[(i * len(items)) // count] for i in range(count)]
+
+
 def run_agents(*, n: int, seed: int, incidents: int) -> dict[str, Any]:
     """Evaluate the agent layer (PRD F-02, F-04, F-05, F-08, Section 9.1).
 
@@ -818,7 +832,7 @@ def run_agents(*, n: int, seed: int, incidents: int) -> dict[str, Any]:
     unresolvable_refs = 0
     reports = 0
 
-    for alert in test[:incidents]:
+    for alert in _spread(test, incidents):
         run_result = graph.invoke(
             new_incident(alert, at=clock.now()), clock=clock, audit=log
         )
@@ -1516,7 +1530,7 @@ def run_connectors(*, n: int, seed: int, incidents: int) -> dict[str, Any]:
         validation=[alerts[i] for i in split.validation],
         seed=seed,
     )
-    feed = [alerts[i] for i in split.test][:incidents]
+    feed = _spread([alerts[i] for i in split.test], incidents)
     tenant = feed[0].tenant_id
     kb = KnowledgeBase.build()
     snapshot = RepoSnapshot.from_dir(FIXTURE_DIR)
