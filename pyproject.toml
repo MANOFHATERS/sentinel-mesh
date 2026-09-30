@@ -79,6 +79,8 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 # are read-only test data shared across parametrisations.
 "tests/unit/test_audit_log.py" = ["RUF001", "RUF002", "RUF012"]
 "tests/integration/test_pipeline.py" = ["RUF001", "RUF002"]
+# The homoglyph (Cyrillic "і") is the injection-evasion attack under test.
+"tests/integration/test_edge_cases.py" = ["RUF001", "RUF003"]
 
 [tool.mypy]
 python_version = "3.12"

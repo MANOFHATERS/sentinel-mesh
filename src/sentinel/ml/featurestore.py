@@ -66,6 +66,9 @@ __all__ = [
 ]
 
 DTYPE: Final = np.float64
+
+#: Largest magnitude a standardized feature may take, in standard deviations.
+STANDARDIZED_CAP: Final[float] = 1e6
 """float64 throughout. A security model that disagrees with itself between the
 training notebook and the serving process because one used float32 is not a
 debugging session anybody enjoys."""
@@ -407,7 +410,16 @@ class AlertVectorizer:
                 "vectorizer must be fitted before transforming; call fit() on the training "
                 "split only, never on validation or test data"
             )
-        return (raw - self._mean) / self._scale
+        # Bounded, because a flow record is attacker-influenced. A finite but absurd
+        # value (1e308 bytes) overflowed ``(raw - mean) / scale`` to infinity, the
+        # detectors then refused the non-finite matrix, and the triage node failed:
+        # one crafted record kept an alert away from every human. Past a million
+        # standard deviations a value is maximally anomalous whatever its magnitude,
+        # so capping there changes no score a real flow can produce (found by the
+        # Part 5 edge-case probe; see test_featurestore.py).
+        with np.errstate(over="ignore", invalid="ignore"):
+            scaled = (raw - self._mean) / self._scale
+        return np.clip(scaled, -STANDARDIZED_CAP, STANDARDIZED_CAP)
 
     # --- persistence --------------------------------------------------------
 

@@ -192,7 +192,7 @@ function renderShell() {
     h(
       "header",
       { class: "topbar" },
-      h("div", { class: "brand" }, h("span", { class: "logo", "aria-hidden": "true" }, "◆"), "Sentinel Mesh", h("span", { class: "sub" }, "Analyst Copilot")),
+      h("div", { class: "brand" }, h("span", { class: "logo", "aria-hidden": "true" }, "S"), "Sentinel Mesh", h("span", { class: "sub" }, "Analyst Copilot")),
       h(
         "div",
         { class: "who" },
@@ -243,6 +243,7 @@ function renderLogin(message) {
         }
       },
     },
+    h("span", { class: "logo", "aria-hidden": "true" }, "S"),
     h("h1", {}, "Sentinel Mesh"),
     h("p", { class: "sub" }, "Analyst Copilot · sign in with your dashboard token"),
     h("label", { for: "token" }, "Token"),

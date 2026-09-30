@@ -203,6 +203,11 @@ class _CalibratedDetector(ABC):
                 f"{self.name} was fitted on {self._n_features} features but received "
                 f"{matrix.shape[1]}; the feature spec changed under the model"
             )
+        if matrix.shape[0] == 0:
+            # A quiet feed produces an empty batch. scikit-learn refuses zero rows
+            # with its own error, which surfaced as a library ValueError mid-pipeline
+            # (Part 5 edge-case probe); an empty batch has an empty answer.
+            return np.empty(0, dtype=DTYPE)
         return self._calibrator.transform(self._raw_score(matrix))
 
     def raw_score(self, x: np.ndarray) -> np.ndarray:
