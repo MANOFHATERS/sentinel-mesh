@@ -8,7 +8,7 @@ with code but no test is listed as *partial*.
 
 ## Where things stand, and what the next session builds
 
-**All five parts are complete, and every PRD acceptance criterion F-01 to F-12 is met**
+**Parts 1–5.3 are complete, and every PRD acceptance criterion F-01 to F-12 is met**
 and measured by one command, which exits non-zero if any gate fails. All five PRD
 agents run on three checkpointed graphs that share one state machine, one Human Approval
 Gate and one audit chain; every approved action leaves the process through real HTTP
@@ -18,7 +18,9 @@ from the UI alone (F-10). Part 5.1 put the response policy into the live inciden
 flow (§5.5.4), added the F-12 alert-reduction chart and the §9.1 regret curve, and a
 Models page showing every model's training record. Part 5.2 ran a 130-case
 adversarial edge-case audit across all five parts, fixed the three real bugs it
-found, and gave the dashboard a single bright theme.
+found, and gave the dashboard a single bright theme. Part 5.3 replaced pasted tokens
+with single sign-on (OIDC, MFA, SCIM, short-lived sessions, sign-in audit) and made the
+interface show each role only what it may use.
 
 ```bash
 python scripts/evaluate.py --n 20000 --cross-dataset --graph --kb --policy \
@@ -26,7 +28,7 @@ python scripts/evaluate.py --n 20000 --cross-dataset --graph --kb --policy \
 python -m sentinel.dashboard      # the Analyst Copilot on http://127.0.0.1:8765/
 ```
 
-`3,121 tests passing` (plus 29 front-end tests under `node --test`, run from pytest),
+`3,289 tests collected and passing` (plus 38 front-end tests under `node --test`, run from pytest),
 ruff clean. One timing test — F-11's 50k-row verification — exceeded its 1 s budget
 under a 4-worker parallel run and passes alone; see the Part 5 caveats.
 
@@ -1369,6 +1371,10 @@ tests in `tests/unit/test_dashboard_sso.py`.
 | Sessions | 15-minute access token, rotating refresh token, absolute lifetime; a refresh token used twice revokes the whole session. Only digests stored |
 | Audit | Every sign-in, refusal, refresh, logout and SCIM change goes to a hash-chained log, shown on the Audit page |
 | Static tokens | Kept as API keys for machines; with SSO on they exist only if `SENTINEL_DASHBOARD_TOKENS` is set |
+
+Role-aware interface: launch, replay, approve/reject and recover are not rendered for a
+viewer (a read-only banner explains why); the 403 stays as the enforcement. Signing out
+resets the route so the next sign-in starts at Overview.
 
 The browser still holds a bearer token and sends it in a header (no cookie, so no CSRF
 surface). It reaches the page as a one-time handoff code in the URL *fragment*, exchanged

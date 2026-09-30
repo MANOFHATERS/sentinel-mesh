@@ -3,7 +3,7 @@
 An autonomous, agentic security operations platform for the mid-market and the MSSPs
 that protect it. Implementation of [`Sentinel_Mesh_PRD.docx`](Sentinel_Mesh_PRD.docx).
 
-**Status: Parts 1–5 complete; every PRD acceptance criterion F-01 to F-12 is met** — the foundation (ingestion, contracts,
+**Status: Parts 1–5.3 complete; every PRD acceptance criterion F-01 to F-12 is met** — the foundation (ingestion, contracts,
 tamper-evident audit, anomaly detection), the intelligence core (deep detector,
 supply-chain GNN, RAG knowledge base, bandit response policy, diffusion augmentation),
 the full agent layer (**all five PRD agents** across three checkpointed graphs sharing
@@ -11,12 +11,16 @@ one state machine, one Human Approval Gate and one audit chain), and the **conne
 layer**: real HTTP connectors for Wazuh (EDR/firewall), SCIM (identity), GitHub (draft
 PRs, never merges) and Slack/signed webhooks, behind a least-privilege router, exercised
 end to end against live local API emulators, and the **Analyst Copilot dashboard**
-(Part 5), from which all three PRD demo scenarios complete end to end. See [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md) for exactly
+(Part 5), from which all three PRD demo scenarios complete end to end. Since Part 5.3 people
+sign in through **single sign-on** (OIDC with MFA, roles from identity-provider groups,
+SCIM provisioning, short-lived sessions, an audited sign-in trail), and the interface shows
+each role only the controls it may use. See [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md) for exactly
 what is done, what is measured, every finding that changed the design, and where the next
-session picks up.
+session picks up, and [docs/PROJECT_REPORT.md](docs/PROJECT_REPORT.md) for a complete report of
+what was built.
 
 ```
-3,121 Python tests + 29 front-end tests · ruff clean
+3,289 Python tests + 38 front-end tests · ruff clean
 ```
 
 ## What works today
@@ -26,8 +30,8 @@ pip install -e ".[dev]"
 python -m pytest -q
 python scripts/evaluate.py --n 20000 --cross-dataset --graph --kb --policy \
     --agents --codescan --supplychain --connectors --dashboard
-python -m sentinel.dashboard   # Analyst Copilot: prints tokens, serves http://127.0.0.1:8765/
-python -m sentinel.dashboard --dev-idp   # same, with SSO through a demo identity provider
+python -m sentinel.dashboard             # Analyst Copilot: prints API tokens, serves http://127.0.0.1:8765/
+python -m sentinel.dashboard --dev-idp   # the same with single sign-on, through a demo identity provider
 ```
 
 No datasets, no API keys, **no LLM call**, no Redis, **no torch**, and no outbound
@@ -203,6 +207,7 @@ Layer 5  Action         sentinel.connectors.router    least-privilege dispatch  
                         sentinel.connectors.sandbox   live local API emulators        ✅
 Layer 6  Oversight      sentinel.audit                hash-chained audit log          ✅
                         sentinel.dashboard            Analyst Copilot (F-10)          ✅
+                        sentinel.dashboard.sso        OIDC SSO, SCIM, sessions, audit ✅
 ```
 
 ## The design decisions worth knowing about
@@ -480,8 +485,9 @@ src/sentinel/
                 investigate, contain, codescan, supplychain, orchestrator
   connectors/   egress allowlist, targets, journal, router, and the Wazuh,
                 SCIM, GitHub and Slack/webhook connectors; live API emulators
-  dashboard/    the three demo scenarios, the live workspace, auth, the FastAPI
-                app and its zero-build front end (static/)
+  dashboard/    the three demo scenarios, the live workspace, auth (API tokens),
+                sso (OIDC, SCIM, sessions, sign-in audit), a demo identity provider,
+                the FastAPI app and its zero-build front end (static/)
 data/
   vulnerable_app/  the F-07 fixture: 18 seeded defects, 18 SAFE controls,
                    with its ground truth as marker comments in the source
@@ -492,6 +498,7 @@ tests/
 scripts/
   evaluate.py   the single evaluation pipeline (F-12) — every gate, one command
 docs/
+  PROJECT_REPORT.md a complete report of what was built, by part
   BUILD_PLAN.md  what is built, what is measured, every finding, what is next
   ARCHITECTURE.md the decisions, and why the obvious alternative is wrong
   DATA.md        dataset downloads and every quirk the normalizers handle
@@ -506,5 +513,27 @@ see the NumPy note above. Later parts add theirs:
 ```bash
 pip install -e ".[bus]"     # redis — live event bus instead of the in-memory one
 pip install -e ".[agents]"  # langgraph, anthropic — Part 3
+pip install -e ".[api]"     # fastapi, uvicorn, httpx, pyjwt — the dashboard and SSO
 pip install -e ".[deep]"    # torch — optional alternative backend, not required
 ```
+
+## Signing in and roles
+
+The dashboard has two ways in, for two kinds of caller:
+
+| Caller | How | Notes |
+|---|---|---|
+| A person | **Single sign-on** (OIDC authorization code + PKCE) through the organisation's identity provider | ID token verified (signature, issuer, audience, expiry, nonce); a second factor is required; `SOC-Analyst` → analyst, `Auditor` → viewer, no mapped group → refused |
+| A machine | A static API key (`SENTINEL_DASHBOARD_TOKENS`) | With SSO on, none exist unless configured explicitly |
+
+An **analyst** can launch scenarios and approve or reject actions; a **viewer** reads
+everything for their tenant and sees none of those controls (the API answers 403 as well —
+hiding a button is the interface, the check on the server is the security). SCIM at
+`/scim/v2/Users` provisions and deactivates users, and deactivating one ends their live
+sessions at once. Sessions are a 15-minute access token with a rotating refresh token; every
+sign-in, refusal and refresh is written to a hash-chained log shown on the Audit page.
+
+`--dev-idp` starts a stand-in identity provider so this can be demonstrated on a laptop.
+**It is the only provider this has been tested against**; a real Okta or Azure AD tenant is
+three settings away (`SENTINEL_OIDC_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET`) but has not
+been tried. Sessions, the SCIM directory and the sign-in log live in memory.
