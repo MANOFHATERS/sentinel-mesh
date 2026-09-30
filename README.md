@@ -3,7 +3,7 @@
 An autonomous, agentic security operations platform for the mid-market and the MSSPs
 that protect it. Implementation of [`Sentinel_Mesh_PRD.docx`](Sentinel_Mesh_PRD.docx).
 
-**Status: Parts 1–5.5 complete; every PRD acceptance criterion F-01 to F-12 is met** — the foundation (ingestion, contracts,
+**Status: Parts 1–5.6 complete; every PRD acceptance criterion F-01 to F-12 is met** — the foundation (ingestion, contracts,
 tamper-evident audit, anomaly detection), the intelligence core (deep detector,
 supply-chain GNN, RAG knowledge base, bandit response policy, diffusion augmentation),
 the full agent layer (**all five PRD agents** across three checkpointed graphs sharing
@@ -20,7 +20,7 @@ session picks up, and [docs/PROJECT_REPORT.md](docs/PROJECT_REPORT.md) for a com
 what was built.
 
 ```
-3,312 Python tests + 54 front-end tests · ruff clean
+3,381 Python tests + 54 front-end tests · ruff clean
 ```
 
 ## What works today
@@ -532,6 +532,16 @@ hiding a button is the interface, the check on the server is the security). SCIM
 `/scim/v2/Users` provisions and deactivates users, and deactivating one ends their live
 sessions at once. Sessions are a 15-minute access token with a rotating refresh token; every
 sign-in, refusal and refresh is written to a hash-chained log shown on the Audit page.
+
+**Real data, by login.** The demo above is synthetic on purpose (reproducible, no downloads). Sign in
+as a **REAL DATA** user instead and the whole dashboard is built from real public data: the alerts
+are real labelled network flows (UNSW-NB15), the triage model is trained on the real training split
+and scored on flows it never saw, investigations cite MITRE's own ATT&CK catalogue, and the Code scan
+page scans any public GitHub repository you paste. The header says which data you are looking at
+(`REAL DATA` / `SYNTHETIC DEMO`), and pages with no real data behind them (the scripted scenarios,
+the synthetic supply-chain map, the synthetic model records) are not offered to the real login.
+`python scripts/fetch_real_data.py` lists the two files it needs (~32 MB and ~54 MB) and downloads
+nothing until you add `--yes`.
 
 **Live runs.** The Models and Evaluation pages open on saved results. An analyst can also
 re-train the models under a chosen seed (~12 s), run a quick evaluation (~18 s) or the full

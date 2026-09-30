@@ -28,7 +28,19 @@ from sentinel.dashboard.auth import Identity, Role, TokenRegistry
 from sentinel.dashboard.workspace import DEFAULT_ALERTS, DEFAULT_SEED, MeshModels, Workspace
 
 
-def _build_sso(args, public: str, tenants: frozenset[str], root: Path):
+def _real_files(root: Path = Path(".")):
+    """``(dataset csv, attack json, label)`` when the real public data is on disk, else ``None``."""
+    from sentinel.real.network import detect_format, find_dataset
+
+    dataset = find_dataset(root)
+    attack = root / "data" / "real" / "enterprise-attack.json"
+    if dataset is None or not attack.is_file():
+        return None
+    label = {"unsw": "UNSW-NB15", "cic": "CIC-IDS2017"}[detect_format(dataset)]
+    return dataset, attack, label
+
+
+def _build_sso(args, public: str, tenants: frozenset[str], root: Path, *, real: bool = False):
     """``(SsoService | None, dev IdP app | None)`` from flags and environment."""
     from sentinel.dashboard.sso import AuthAudit, SsoConfig, SsoService
 
@@ -41,7 +53,14 @@ def _build_sso(args, public: str, tenants: frozenset[str], root: Path):
 
         issuer = f"{public}/devidp"
         client_id = "sentinel-mesh-dashboard"
-        idp = make_dev_idp(issuer=issuer, client_id=client_id, redirect_uri=redirect)
+        from sentinel.dashboard.devidp import DEMO_USERS, REAL_USERS
+
+        idp = make_dev_idp(
+            issuer=issuer,
+            client_id=client_id,
+            redirect_uri=redirect,
+            users=DEMO_USERS + REAL_USERS if real else DEMO_USERS,
+        )
         config = SsoConfig(
             issuer=issuer, client_id=client_id, redirect_uri=redirect,
             group_roles=SsoConfig.parse_group_roles("SOC-Analyst=analyst,Auditor=viewer"),
@@ -97,11 +116,38 @@ def main(argv: list[str] | None = None) -> int:
     # it finishes (about half a minute on a laptop).
     models.start_background()
     root = args.workdir or Path(tempfile.mkdtemp(prefix="sentinel-dashboard-"))
-    workspaces = {
-        tenant: Workspace(models, tenant_id=tenant, workdir=root / tenant) for tenant in tenants
-    }
+    from sentinel.dashboard.registry import WorkspaceRegistry
+
+    workspaces = WorkspaceRegistry(
+        {tenant: Workspace(models, tenant_id=tenant, workdir=root / tenant) for tenant in tenants}
+    )
+    real_files = _real_files()
+    if real_files is not None:
+        # The real-data workspace trains on a real capture and indexes the real ATT&CK catalogue.
+        # That takes about a minute, so it builds in the background and is served as "preparing"
+        # until it is ready; the synthetic demo is not held back.
+        dataset, attack, label = real_files
+        workspaces.declare("real", mode="real", dataset=f"{label} (real)")
+
+        def build_real() -> None:
+            try:
+                real_models = MeshModels.build_real(
+                    models, dataset_path=dataset, attack_path=attack, seed=args.seed
+                )
+                workspaces.set_ready(
+                    "real", Workspace(real_models, tenant_id="real", workdir=root / "real")
+                )
+                print("real-data workspace ready", flush=True)
+            except Exception as exc:  # reported to the user by the registry, never fatal
+                workspaces.set_failed("real", f"{type(exc).__name__}: {exc}")
+                print(f"real-data workspace failed: {exc}", flush=True)
+
+        import threading
+
+        threading.Thread(target=build_real, name="real-workspace", daemon=True).start()
     public = (args.public_url or f"http://{args.host}:{args.port}").rstrip("/")
-    sso, idp = _build_sso(args, public, frozenset(tenants), root)
+    sso_tenants = frozenset(tenants) | ({"real"} if real_files else frozenset())
+    sso, idp = _build_sso(args, public, sso_tenants, root, real=real_files is not None)
     spec = os.environ.get("SENTINEL_DASHBOARD_TOKENS")
     if spec:
         tokens = TokenRegistry.parse(spec)
@@ -109,20 +155,28 @@ def main(argv: list[str] | None = None) -> int:
     elif sso is not None:
         tokens, issued = TokenRegistry({}), {}
     else:
+        every = [*tenants, *(["real"] if real_files else [])]
         tokens, issued = TokenRegistry.generate(
-            [Identity(f"analyst@{t}.example", t, Role.ANALYST) for t in tenants]
-            + [Identity(f"viewer@{t}.example", t, Role.VIEWER) for t in tenants]
+            [Identity(f"analyst@{t}.example", t, Role.ANALYST) for t in every]
+            + [Identity(f"viewer@{t}.example", t, Role.VIEWER) for t in every]
         )
     from sentinel.dashboard.lab import model_report
     from sentinel.dashboard.runs import RunManager
     from sentinel.dashboard.views import evaluation_view
+    from sentinel.real.service import RealData
 
+    real = RealData(Path("."), curated_kb=models.kb)
+    real.warm()
     runs = RunManager(
         workdir=root / "runs",
         retrain=lambda seed: model_report(MeshModels.build(seed=seed, n_alerts=args.alerts)),
         read_evaluation=evaluation_view,
+        handlers={"real_network": real.run_network, "real_scan": real.run_scan},
+        availability=lambda: {"real_network": real.network_path() is not None},
     )
-    app = create_app(workspaces, tokens, evaluation_path=args.evaluation, sso=sso, runs=runs)
+    app = create_app(
+        workspaces, tokens, evaluation_path=args.evaluation, sso=sso, runs=runs, real=real
+    )
     if idp is not None:
         app.mount("/devidp", idp)
     print(f"ready in {time.perf_counter() - started:.1f}s; state in {root}")
@@ -133,13 +187,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.dev_idp:
             print("  demo identity provider: maya.analyst@ (analyst), omar.auditor@ (viewer),")
             print("  nina.nomfa@ (refused: no MFA), carl.contractor@ (refused: no group)")
+            if real_files:
+                print("  REAL DATA users: real.analyst@ (analyst), real.auditor@ (viewer) — the")
+                print("  whole dashboard shows the real capture and real ATT&CK for these two")
         if os.environ.get("SENTINEL_SCIM_TOKEN"):
             print("  SCIM provisioning at /scim/v2/Users")
     print(f"open http://{args.host}:{args.port}/", flush=True)
     try:
         uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     finally:
-        for workspace in workspaces.values():
+        for _tenant, workspace in workspaces.ready_items():
             workspace.close()
     return 0
 

@@ -121,6 +121,10 @@ def test_analyst_group_signs_in_as_analyst(stack):
         "tenant_id": "acme",
         "role": "analyst",
         "can_act": True,
+        "data_mode": "synthetic",
+        "dataset": None,
+        "workspace": "ready",
+        "workspace_error": None,
     }
 
 

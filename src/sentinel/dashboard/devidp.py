@@ -29,7 +29,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-__all__ = ["DEMO_USERS", "DemoUser", "make_dev_idp"]
+__all__ = ["DEMO_USERS", "REAL_USERS", "DemoUser", "make_dev_idp"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +40,23 @@ class DemoUser:
     mfa: bool = True
     tenant: str = "acme"
 
+
+#: People whose workspace runs on real public data (tenant ``real``): a real network capture,
+#: MITRE's real ATT&CK catalogue and real repositories. Offered only when those files exist.
+REAL_USERS: Final[tuple[DemoUser, ...]] = (
+    DemoUser(
+        "real.analyst@acme.example",
+        "REAL DATA — SOC analyst (real capture, real ATT&CK; group SOC-Analyst, MFA)",
+        ("SOC-Analyst",),
+        tenant="real",
+    ),
+    DemoUser(
+        "real.auditor@acme.example",
+        "REAL DATA — Auditor (read-only; group Auditor, MFA)",
+        ("Auditor",),
+        tenant="real",
+    ),
+)
 
 DEMO_USERS: Final[tuple[DemoUser, ...]] = (
     DemoUser(

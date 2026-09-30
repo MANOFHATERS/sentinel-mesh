@@ -52,6 +52,7 @@ what an analyst *saw* and what they are approving.
 
 from __future__ import annotations
 
+import random
 import sqlite3
 import threading
 from collections.abc import Callable, Iterator, Sequence
@@ -203,6 +204,12 @@ class MeshModels:
     #: Section 5.5.5, run on a background thread once :meth:`start_background` is
     #: called (the dashboard does; tests that do not need it never pay for it).
     diffusion: DiffusionStudy
+    #: ``"synthetic"`` (the scripted demo, the default) or ``"real"``: the triage model was
+    #: trained on a real public capture, the knowledge base is MITRE's real ATT&CK catalogue
+    #: and the feed is real held-out flows. See :meth:`build_real`.
+    mode: str = "synthetic"
+    #: The real-data evaluation report that :meth:`build_real` produced, when ``mode == "real"``.
+    real_report: dict[str, Any] | None = None
 
     @classmethod
     def build(cls, *, seed: int = DEFAULT_SEED, n_alerts: int = DEFAULT_ALERTS) -> MeshModels:
@@ -264,6 +271,47 @@ class MeshModels:
             policy_training=policy_training,
             graph_evaluation=graph_evaluation(graph, truth, gnn, graph_split),
             diffusion=DiffusionStudy(seed=seed, n_alerts=n_alerts),
+        )
+
+    @classmethod
+    def build_real(
+        cls,
+        base: MeshModels,
+        *,
+        dataset_path: str | Path,
+        attack_path: str | Path,
+        seed: int = DEFAULT_SEED,
+        limit: int = 20_000,
+    ) -> MeshModels:
+        """The real-data variant: real triage model, real ATT&CK, real held-out flows.
+
+        Built *from* ``base`` so nothing the real workspace does not use is retrained. What is
+        replaced is exactly what the audience sees as data: the triage model (fitted on the real
+        training split only), the knowledge base (MITRE's published catalogue) and the feed (the
+        real test split, in file order). There are no scripted scenarios, and the supply-chain
+        graph, GNN and repository fixture are shared but unreachable: the API refuses those
+        routes for a real workspace, because there is no real graph to show (PRD Phase 2).
+        """
+        from dataclasses import replace
+
+        from sentinel.real.attack import build_attack_kb
+        from sentinel.real.network import train_real
+
+        model, test, report = train_real(dataset_path, limit=limit, seed=seed)
+        # The capture is stored in stretches of one kind of traffic; streamed in file order the
+        # first minutes of the feed would be all benign or all attack. A seeded shuffle
+        # interleaves them the way a mixed feed arrives, reproducibly.
+        feed = list(test)
+        random.Random(seed).shuffle(feed)
+        return replace(
+            base,
+            seed=seed,
+            triage_model=model,
+            kb=build_attack_kb(attack_path),
+            story_flows={},
+            feed=tuple(feed),
+            mode="real",
+            real_report=report,
         )
 
     def start_background(self) -> MeshModels:
@@ -614,6 +662,10 @@ class Workspace:
 
     def launch(self, name: ScenarioName, *, launched_by: str) -> tuple[str, ...]:
         """Start a scenario. Returns the thread ids it opened, in story order."""
+        if self.models.mode == "real":
+            raise WorkspaceError(
+                "scenarios are scripted stories; this workspace runs on real data and has none"
+            )
         with self._locked():
             if name in self._scenarios:
                 raise Conflict(f"scenario {name.value} has already been launched")

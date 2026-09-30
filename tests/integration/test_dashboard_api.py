@@ -247,7 +247,8 @@ def test_session_reports_the_token_s_identity(stack):
     client, *_ = stack
     assert client.get("/api/session", headers=auth()).json() == {
         "principal": "maya@acme.example", "tenant_id": "acme", "role": "analyst",
-        "can_act": True,
+        "can_act": True, "data_mode": "synthetic", "dataset": None,
+        "workspace": "ready", "workspace_error": None,
     }
 
 

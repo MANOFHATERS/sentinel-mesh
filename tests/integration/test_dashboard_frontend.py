@@ -58,3 +58,39 @@ def test_live_run_controls_are_analyst_only_and_the_saved_report_stays_the_defau
     # the pages still open on the saved / start-up results; a live run is added beside them
     assert "`Saved report (" in source and '"Trained at server start-up"' in source
     assert "liveEvaluationBlock(runs.jobs[kind], e)" in source
+
+
+def test_every_external_link_opens_safely_and_the_real_page_uses_text_only():
+    source = (STATIC / "js" / "app.js").read_text(encoding="utf-8")
+    opens = source.count('target: "_blank"')
+    assert opens >= 4, "the real-data page links to attack.mitre.org and github.com"
+    # a link that opens a new tab must not hand the page to the site it opens
+    assert source.count('rel: "noopener noreferrer"') == opens
+    # repository content and catalogue text are attacker-influenced; they are only ever text
+    assert "innerHTML" not in source
+
+
+def test_the_login_decides_the_data_not_a_separate_page():
+    source = (STATIC / "js" / "app.js").read_text(encoding="utf-8")
+    # no standalone "Real data" page: the real login gets a whole real workspace instead
+    assert '["real", "Real data"]' not in source and "viewReal()" not in source
+    # the sidebar is chosen from the session, and the real one omits what has no real data
+    assert "isReal() ? NAV_REAL : NAV" in source
+    real_nav = source.split("const NAV_REAL = [")[1].split("];")[0]
+    for offered in (
+        "overview",
+        "queue",
+        "incidents",
+        "code-scan",
+        "wire",
+        "audit",
+        "kb",
+        "evaluation",
+    ):
+        assert f'["{offered}"' in real_nav
+    for hidden in ("scenarios", "supply-chain", "models"):
+        assert f'["{hidden}"' not in real_nav
+    # the header says, in words, which data this login is looking at
+    assert "REAL DATA" in source and "SYNTHETIC DEMO" in source
+    # a workspace that is still building is explained, not shown as an error
+    assert "Preparing the real-data workspace" in source

@@ -46,10 +46,13 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from sentinel.dashboard import views
 from sentinel.dashboard.auth import AuthError, Identity, TokenRegistry
 from sentinel.dashboard.lab import model_report
+from sentinel.dashboard.registry import WorkspaceUnavailable
 from sentinel.dashboard.runs import Busy, RunManager, RunsUnavailable
 from sentinel.dashboard.scenarios import ASSET_INVENTORY, ScenarioName
 from sentinel.dashboard.sso import SsoService, install_sso
 from sentinel.dashboard.workspace import Conflict, NotFound, Workspace, WorkspaceError
+from sentinel.real.repos import RepoError, parse_github_url
+from sentinel.real.service import RealData
 
 __all__ = ["STATIC_DIR", "create_app"]
 
@@ -86,8 +89,10 @@ class DecisionBody(BaseModel):
 class RunBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kind: str = Field(pattern="^(retrain|eval_quick|eval_full)$")
+    kind: str = Field(pattern="^(retrain|eval_quick|eval_full|real_network|real_scan)$")
     seed: int = Field(default=20260928, ge=0, le=2**31 - 1)
+    url: str | None = Field(default=None, max_length=300)
+    limit: int | None = Field(default=None, ge=1_000, le=200_000)
 
 
 class ReplayBody(BaseModel):
@@ -103,12 +108,14 @@ def create_app(
     evaluation_path: Path | None = None,
     sso: SsoService | None = None,
     runs: RunManager | None = None,
+    real: RealData | None = None,
 ) -> FastAPI:
     """Build the app. Every tenant a token names must have a workspace."""
     missing = sorted(tokens.tenants - set(workspaces))
     if missing:
         raise AuthError(f"tokens name tenants with no workspace: {missing}")
-    for tenant, workspace in workspaces.items():
+    ready = workspaces.ready_items() if hasattr(workspaces, "ready_items") else workspaces.items()
+    for tenant, workspace in ready:
         if workspace.tenant_id != tenant:
             raise AuthError(
                 f"workspace for {tenant!r} serves tenant {workspace.tenant_id!r}"
@@ -156,6 +163,14 @@ def create_app(
     async def _conflict(_request: Request, exc: Conflict) -> JSONResponse:
         return JSONResponse({"error": "conflict", "detail": str(exc)}, status_code=409)
 
+    @app.exception_handler(WorkspaceUnavailable)
+    async def _unavailable(_request: Request, exc: WorkspaceUnavailable) -> JSONResponse:
+        return JSONResponse(
+            {"error": "failed" if exc.failed else "preparing", "detail": str(exc)},
+            status_code=503,
+            headers={"Retry-After": "5"},
+        )
+
     @app.exception_handler(WorkspaceError)
     async def _workspace(_request: Request, exc: WorkspaceError) -> JSONResponse:
         return JSONResponse({"error": "bad_request", "detail": str(exc)}, status_code=400)
@@ -180,9 +195,18 @@ def create_app(
             raise Forbidden(f"{who.principal} is a {who.role.value}; viewers cannot act")
         return who
 
+    def synthetic_workspace(ws: Annotated[Workspace, Depends(workspace)]) -> Workspace:
+        # The scripted scenarios, the synthetic supply-chain graph and the fixture repository have
+        # no real counterpart yet (PRD Phase 2: SBOM ingestion), so a real workspace refuses them
+        # rather than serve synthetic content under a real-data label.
+        if ws.models.mode == "real":
+            raise NotFound("not available in the real-data workspace: no real data behind it")
+        return ws
+
     Who = Annotated[Identity, Depends(identity)]
     Actor = Annotated[Identity, Depends(actor)]
     Ws = Annotated[Workspace, Depends(workspace)]
+    SynWs = Annotated[Workspace, Depends(synthetic_workspace)]
 
     # --- routes ----------------------------------------------------------------- #
 
@@ -190,10 +214,20 @@ def create_app(
     def health() -> dict[str, Any]:
         return {"ok": True}
 
+    def describe_tenant(tenant: str) -> dict[str, Any]:
+        if hasattr(workspaces, "describe"):
+            return workspaces.describe(tenant)
+        models = getattr(workspaces.get(tenant), "models", None)
+        return {"mode": getattr(models, "mode", "synthetic"), "dataset": None,
+                "state": "ready", "error": None}
+
     @app.get("/api/session")
     def session(who: Who) -> dict[str, Any]:
+        info = describe_tenant(who.tenant_id)
         return {"principal": who.principal, "tenant_id": who.tenant_id,
-                "role": who.role.value, "can_act": who.can_act}
+                "role": who.role.value, "can_act": who.can_act,
+                "data_mode": info["mode"], "dataset": info["dataset"],
+                "workspace": info["state"], "workspace_error": info["error"]}
 
     @app.get("/api/auth/audit")
     def auth_audit(who: Who) -> dict[str, Any]:
@@ -216,11 +250,11 @@ def create_app(
         ]
 
     @app.get("/api/scenarios")
-    def scenarios(ws: Ws) -> list[dict[str, Any]]:
+    def scenarios(ws: SynWs) -> list[dict[str, Any]]:
         return views.scenarios_view(ws)
 
     @app.post("/api/scenarios/{name}/launch")
-    def launch(name: str, ws: Ws, who: Actor) -> dict[str, Any]:
+    def launch(name: str, ws: SynWs, who: Actor) -> dict[str, Any]:
         try:
             scenario = ScenarioName(name)
         except ValueError as exc:
@@ -271,7 +305,7 @@ def create_app(
 
     @app.get("/api/supply-chain/graph")
     def supply_graph(
-        ws: Ws,
+        ws: SynWs,
         scope: Annotated[str, Query(max_length=96)] = "top",
         k: Annotated[int, Query(ge=1, le=50)] = 10,
     ) -> dict[str, Any]:
@@ -282,14 +316,14 @@ def create_app(
     @app.get("/api/supply-chain/nodes/{node_id}")
     def supply_node(
         node_id: str,
-        ws: Ws,
+        ws: SynWs,
         advisory: Annotated[str | None, Query(max_length=64)] = None,
     ) -> dict[str, Any]:
         explanation = ws.explain(node_id, advisory_id=advisory)
         return {**views.node_view(explanation, ws.graph), "advisory_id": advisory}
 
     @app.get("/api/code-scan")
-    def code_scan(ws: Ws) -> dict[str, Any]:
+    def code_scan(ws: SynWs) -> dict[str, Any]:
         view = views.code_scan_view(ws)
         return {"available": view is not None, "scan": view}
 
@@ -322,8 +356,17 @@ def create_app(
     def start_run(body: RunBody, who: Actor) -> dict[str, Any]:
         if runs is None:
             raise NotFound("live runs are not enabled on this server")
+        params: dict[str, Any] = {}
+        if body.kind == "real_scan":
+            try:
+                parse_github_url(body.url or "")
+            except RepoError as exc:
+                raise WorkspaceError(str(exc)) from exc
+            params["url"] = (body.url or "").strip()
+        if body.kind == "real_network" and body.limit:
+            params["limit"] = body.limit
         try:
-            job = runs.start(body.kind, body.seed, by=who.principal)
+            job = runs.start(body.kind, body.seed, by=who.principal, params=params)
         except Busy as exc:
             raise Conflict(str(exc)) from exc
         except RunsUnavailable as exc:
@@ -337,8 +380,31 @@ def create_app(
             raise NotFound(f"no run {job_id!r}")
         return runs.describe(job)
 
+    @app.get("/api/real/report")
+    def real_report(ws: Ws) -> dict[str, Any]:
+        """The real-data evaluation this workspace was built from (real workspaces only)."""
+        if ws.models.mode != "real":
+            raise NotFound("this is the synthetic workspace; it has no real-data report")
+        return {"report": ws.models.real_report}
+
+    @app.get("/api/real/status")
+    def real_status(_who: Who) -> dict[str, Any]:
+        if real is None:
+            return {"enabled": False}
+        return {"enabled": True, **real.status()}
+
+    @app.get("/api/real/kb/search")
+    def real_kb_search(
+        _who: Who,
+        q: Annotated[str, Query(min_length=2, max_length=200)],
+        k: Annotated[int, Query(ge=1, le=10)] = 5,
+    ) -> dict[str, Any]:
+        if real is None:
+            raise NotFound("real data is not enabled on this server")
+        return real.kb_search(q, k=k)
+
     @app.get("/api/models")
-    def models_report(ws: Ws) -> dict[str, Any]:
+    def models_report(ws: SynWs) -> dict[str, Any]:
         # Tenant-agnostic training records, but still behind the token: the page
         # says what this deployment trained, which is not public information.
         return model_report(ws.models, policy=ws.models.policy)

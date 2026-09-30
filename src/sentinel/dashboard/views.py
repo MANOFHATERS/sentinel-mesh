@@ -483,6 +483,8 @@ def audit_chain_view(workspace: Workspace) -> dict[str, Any]:
 
 
 def scenarios_view(workspace: Workspace) -> list[dict[str, Any]]:
+    if workspace.models.mode == "real":
+        return []  # scripted stories belong to the synthetic demo
     runs = workspace.scenario_runs()
     items = []
     for name, spec in SCENARIOS.items():

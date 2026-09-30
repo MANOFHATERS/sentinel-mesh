@@ -14,7 +14,7 @@ The design idea that everything else follows from: **an AI system that can act m
 | At a glance | |
 |---|---|
 | Source code | ~37,000 lines of Python in `src/` |
-| Tests | ~29,500 lines · **3,312 Python tests + 54 front-end tests**, ruff clean |
+| Tests | ~29,500 lines · **3,381 Python tests + 54 front-end tests**, ruff clean |
 | Documents | `README.md`, `docs/BUILD_PLAN.md` (ledger, ~1,450 lines), `docs/ARCHITECTURE.md`, `docs/DATA.md`, this report |
 | Commits on `main` | Parts 1 → 5.3, one part per session, each pushed after the full suite and the evaluation gate passed |
 | PRD status | **Every Must/Should criterion F-01 … F-12 met and measured by one command** (`scripts/evaluate.py` exits non-zero if any gate fails). F-13 (PPO) and F-14 (live production integration) are post-sprint by the PRD's own scoping |
@@ -117,6 +117,9 @@ The browser still uses a bearer header (no cookie, so no CSRF surface); the toke
 - **Charts:** bars grow from the baseline and lines draw left to right the first time they scroll into view, on every visit to the Models and Evaluation pages.
 - **Pages:** every page animates in when opened (headings, tiles, cards, table rows staggered); a background refresh never replays it. All motion is CSS, off under `prefers-reduced-motion`.
 
+### Part 5.6 — Real data, by login *(built in this working session)*
+The synthetic demo is untouched. Signing in as a **REAL DATA** user gives a whole workspace built from real public data: real labelled network flows (UNSW-NB15) scored by a triage model trained on the real training split, investigations that cite MITRE's real ATT&CK catalogue (697 techniques), and a Code scan page that scans any public GitHub repository (validated URL, size-capped download from `codeload.github.com`, files parsed and never executed). The header says which data you are looking at; pages with no real data behind them (scripted scenarios, the synthetic supply-chain map) are not offered to the real login. Measured on the real data: ROC-AUC **0.769** against 0.997 synthetic, recall 0.994, and only 21.9% of alerts dismissed. Downloads are opt-in (`scripts/fetch_real_data.py --yes`).
+
 ---
 
 ## 4. Measured results
@@ -162,7 +165,7 @@ The ledger records every finding that changed the design; the notable ones:
 
 ```bash
 pip install -e ".[dev,api]"
-python -m pytest -q                                   # 3,312 tests (+54 front-end)
+python -m pytest -q                                   # 3,381 tests (+54 front-end)
 python scripts/evaluate.py --n 20000 --cross-dataset --graph --kb --policy \
     --agents --codescan --supplychain --connectors --dashboard
 
@@ -179,6 +182,7 @@ python -m sentinel.dashboard --dev-idp   # single sign-on via the demo identity 
 - **No LLM has been called.** `AnthropicEngine` is written and tested against a fake transport, but every number was produced with `NullEngine`. The quality a model adds to narratives is unmeasured.
 - **No real external service has been contacted.** Connectors are real HTTP clients tested against strict local emulators; F-14 is post-sprint by the PRD.
 - **SSO has only been tested against the built-in demo provider.** A real Okta / Azure AD tenant is three settings away but untried. Sessions, the SCIM directory and the sign-in log are in memory (a restart signs everyone out); a group change applies at the next sign-in.
+- **Real data is less flattering.** On the real UNSW-NB15 flows the detector's ROC-AUC is 0.77 (synthetic: 0.997) and about a quarter of benign flows are flagged; that partition has no IP addresses or timestamps, so real incidents' "assets" are flow records and containment is simulated. There is no real supply chain yet (needs SBOM ingestion).
 - **F-06 sits on its bar** (0.80 vs 0.80; per-seed 0.60–0.90). Rank correlation (0.65) is the steadier figure.
 - **F-07 is a measurement on a 268-line fixture**, not a false-positive rate on a production codebase.
 - **The supply-chain graph is synthetic** (PRD §5.5.3), so the Supply-Chain Agent drafts no manifest edit; that needs CycloneDX ingestion.

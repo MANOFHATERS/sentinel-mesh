@@ -32,7 +32,7 @@ import sys
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -54,7 +54,12 @@ class RunKind:
     RETRAIN: Final = "retrain"
     QUICK: Final = "eval_quick"
     FULL: Final = "eval_full"
-    ALL: Final = (RETRAIN, QUICK, FULL)
+    #: Real public data (sentinel.real): the detector on real flows, and a real repository.
+    REAL_NETWORK: Final = "real_network"
+    REAL_SCAN: Final = "real_scan"
+    #: Kinds that run in-process through a handler and cannot be cancelled.
+    HANDLED: Final = (REAL_NETWORK, REAL_SCAN)
+    ALL: Final = (RETRAIN, QUICK, FULL, REAL_NETWORK, REAL_SCAN)
 
 
 #: Fixed argument lists: the only user-supplied value that reaches a command line is the
@@ -97,6 +102,7 @@ class Job:
     exit_code: int | None = None
     proc: subprocess.Popen[str] | None = None
     cancel_requested: bool = False
+    params: dict[str, Any] = field(default_factory=dict)
 
     def view(self, now: float) -> dict[str, Any]:
         end = self.finished if self.finished is not None else now
@@ -110,6 +116,7 @@ class Job:
             "log": list(self.log),
             "error": self.error,
             "exit_code": self.exit_code,
+            "params": self.params,
             "result": self.result,
         }
 
@@ -124,7 +131,11 @@ class RunManager:
         script: Path | None = None,
         python: str = sys.executable,
         now: Callable[[], float] = time.time,
+        handlers: Mapping[str, Callable[[int, dict[str, Any]], dict[str, Any]]] | None = None,
+        availability: Callable[[], dict[str, bool]] | None = None,
     ) -> None:
+        self._handlers = dict(handlers or {})
+        self._availability = availability
         self._workdir = workdir
         self._retrain = retrain
         self._read_evaluation = read_evaluation
@@ -142,21 +153,28 @@ class RunManager:
 
     # -- control ---------------------------------------------------------------- #
 
-    def start(self, kind: str, seed: int, *, by: str) -> Job:
+    def start(self, kind: str, seed: int, *, by: str, params: dict[str, Any] | None = None) -> Job:
         if kind not in RunKind.ALL:
             raise ValueError(f"unknown run kind {kind!r}")
         if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= _MAX_SEED:
             raise ValueError(f"seed must be an integer between 0 and {_MAX_SEED}")
-        if kind != RunKind.RETRAIN and not self.evaluation_available:
+        if kind in RunKind.HANDLED and kind not in self._handlers:
+            raise RunsUnavailable(f"{kind} is not enabled on this server")
+        if kind in (RunKind.QUICK, RunKind.FULL) and not self.evaluation_available:
             raise RunsUnavailable("scripts/evaluate.py is not present in this installation")
         with self._lock:
             if self._running is not None:
                 raise Busy("another run is in progress; wait for it or cancel it")
-            job = Job(secrets.token_hex(6), kind, seed, by, self._now())
+            job = Job(secrets.token_hex(6), kind, seed, by, self._now(), params=dict(params or {}))
             self._jobs[job.id] = job
             self._latest[kind] = job.id
             self._running = job.id
-        target = self._run_retrain if kind == RunKind.RETRAIN else self._run_evaluation
+        if kind == RunKind.RETRAIN:
+            target = self._run_retrain
+        elif kind in RunKind.HANDLED:
+            target = self._run_handler
+        else:
+            target = self._run_evaluation
         threading.Thread(target=target, args=(job,), name=f"run-{job.id}", daemon=True).start()
         return job
 
@@ -167,7 +185,7 @@ class RunManager:
         with self._lock:
             # Flag first, then stop the process if it exists yet: a cancel that lands
             # before the worker has spawned it is honoured the moment it does.
-            if job.state == "running" and job.kind != RunKind.RETRAIN:
+            if job.state == "running" and job.kind in (RunKind.QUICK, RunKind.FULL):
                 job.cancel_requested = True
                 if job.proc is not None:
                     job.proc.terminate()
@@ -187,6 +205,8 @@ class RunManager:
                 RunKind.RETRAIN: True,
                 RunKind.QUICK: self.evaluation_available,
                 RunKind.FULL: self.evaluation_available,
+                **{kind: kind in self._handlers for kind in RunKind.HANDLED},
+                **(self._availability() if self._availability else {}),
             },
             "busy": self._running,
             "jobs": jobs,
@@ -208,6 +228,15 @@ class RunManager:
             job.result = self._retrain(job.seed)
         except Exception as exc:  # a failed re-train is reported, never fatal to the server
             self._finish(job, "failed", error=f"{type(exc).__name__}: {exc}")
+        else:
+            self._finish(job, "done")
+
+    def _run_handler(self, job: Job) -> None:
+        try:
+            job.log.append("working on real public data")
+            job.result = self._handlers[job.kind](job.seed, job.params)
+        except Exception as exc:  # reported on the page; never fatal to the server
+            self._finish(job, "failed", error=f"{type(exc).__name__}: {exc}"[:400])
         else:
             self._finish(job, "done")
 

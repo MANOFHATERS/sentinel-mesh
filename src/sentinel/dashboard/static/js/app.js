@@ -162,6 +162,24 @@ const NAV = [
   ["evaluation", "Evaluation"],
 ];
 
+// A real-data workspace shows only what has real data behind it. The scripted scenarios, the
+// synthetic supply-chain map and the synthetic model records have no real counterpart yet, so
+// they are not offered there, rather than shown under a real-data label.
+const NAV_REAL = [
+  ["overview", "Overview"],
+  ["queue", "Approval queue"],
+  ["incidents", "Incidents"],
+  ["code-scan", "Code scan"],
+  ["wire", "Wire & guardrails"],
+  ["audit", "Audit log"],
+  ["kb", "Knowledge base"],
+  ["evaluation", "Evaluation"],
+];
+
+function isReal() {
+  return Boolean(session) && session.data_mode === "real";
+}
+
 let mainEl = null;
 let navEls = {};
 let queueCountEl = null;
@@ -175,7 +193,7 @@ function renderShell() {
   const nav = h(
     "nav",
     { class: "nav", "aria-label": "Sections" },
-    NAV.map(([name, label]) => {
+    (isReal() ? NAV_REAL : NAV).map(([name, label]) => {
       const item = h("a", { href: `#/${name}`, class: "nav-item" }, label, name === "queue" ? queueCountEl : null);
       navEls[name] = item;
       return item;
@@ -192,7 +210,7 @@ function renderShell() {
     h(
       "header",
       { class: "topbar" },
-      h("div", { class: "brand" }, h("span", { class: "logo", "aria-hidden": "true" }, "S"), "Sentinel Mesh", h("span", { class: "sub" }, "Analyst Copilot")),
+      h("div", { class: "brand" }, h("span", { class: "logo", "aria-hidden": "true" }, "S"), "Sentinel Mesh", h("span", { class: "sub" }, "Analyst Copilot"), isReal() ? h("span", { class: "mode-badge real", title: "Every page in this workspace is built from real public data" }, `REAL DATA · ${session.dataset || "public capture"}`) : h("span", { class: "mode-badge synthetic", title: "Generated data and scripted scenarios" }, "SYNTHETIC DEMO")),
       h(
         "div",
         { class: "who" },
@@ -224,14 +242,14 @@ function runningJob(runs) {
 }
 
 function runStatus(job) {
-  const label = { retrain: "Re-training", eval_quick: "Quick evaluation", eval_full: "Full evaluation" }[job.kind];
+  const label = { retrain: "Re-training", eval_quick: "Quick evaluation", eval_full: "Full evaluation", real_network: "Analysing real flows", real_scan: "Scanning the repository" }[job.kind];
   return [
     h("strong", {}, `${label} running — ${fmtNumber(job.elapsed_s, 0)} s (seed ${job.seed}, started by ${job.started_by})`),
     job.log.length ? h("pre", { class: "run-log" }, job.log.slice(-4).join("\n")) : null,
   ];
 }
 
-function runPanel(runs, { title, intro, kinds, seed }) {
+function runPanel(runs, { title, intro, kinds, seed, fields = [] }) {
   if (!runs.enabled) return null;
   const status = h("div", { class: "run-status", role: "status" });
   const seedInput = h("input", { type: "number", min: "0", max: "2147483647", value: "20260928", id: `seed-${kinds[0].kind}`, class: "narrow", "aria-label": "random seed" });
@@ -270,7 +288,8 @@ function runPanel(runs, { title, intro, kinds, seed }) {
   async function start(kind) {
     buttons.forEach((b) => (b.disabled = true));
     try {
-      await api.post("/api/runs", { kind, seed: fixedSeeds[kind] ?? Number(seedInput.value) });
+      const extra = (kinds.find((k) => k.kind === kind) || {}).payload;
+      await api.post("/api/runs", { kind, seed: fixedSeeds[kind] ?? Number(seedInput.value), ...(extra ? extra() : {}) });
       paint(await api.get("/api/runs"));
       poll();
     } catch (error) {
@@ -283,10 +302,11 @@ function runPanel(runs, { title, intro, kinds, seed }) {
     ? h(
         "div",
         { class: "run-controls" },
+        ...fields,
         seed ? h("label", { for: seedInput.id }, "Seed") : null,
         seed ? seedInput : null,
         kinds.map((k) => {
-          const b = h("button", { class: "btn primary", type: "button", disabled: !runs.available[k.kind], title: runs.available[k.kind] ? "" : "scripts/evaluate.py is not present in this installation", onclick: () => start(k.kind) }, k.label);
+          const b = h("button", { class: "btn primary", type: "button", disabled: !runs.available[k.kind], title: runs.available[k.kind] ? "" : k.disabledHint || "scripts/evaluate.py is not present in this installation", onclick: () => start(k.kind) }, k.label);
           buttons.push(b);
           return h("div", { class: "run-option" }, b, h("span", { class: "meta" }, k.hint));
         }),
@@ -582,7 +602,14 @@ async function viewOverview() {
     { class: "stack" },
     h("h1", {}, "Overview"),
     tiles,
-    section("Demo scenarios", h("div", { class: "cards" }, overview.scenarios.map((sc) => scenarioCard(sc, { compact: true })))),
+    isReal()
+      ? h(
+          "div",
+          { class: "alert" },
+          h("strong", {}, "This workspace runs on real public data. "),
+          `The alerts below are real held-out network flows from ${session.dataset || "a public capture"}, scored by a triage model trained on the real training split; investigations cite MITRE's real ATT&CK catalogue. This dataset carries no host addresses, so the "asset" on an incident is the flow record itself, and a containment action against it is simulated on the local emulators. There are no scripted scenarios here.`,
+        )
+      : section("Demo scenarios", h("div", { class: "cards" }, overview.scenarios.map((sc) => scenarioCard(sc, { compact: true })))),
     replayPanel(overview.feed_remaining),
   );
 }
@@ -1163,6 +1190,7 @@ function nodePanel(node) {
 // --- code scan --------------------------------------------------------------- //
 
 async function viewCodeScan() {
+  if (isReal()) return viewRealCodeScan();
   const data = await api.get("/api/code-scan");
   if (!data.available) {
     return h("div", { class: "stack" }, h("h1", {}, "Code scan"), empty("No scan has run yet. Launch the vendor-dependency CVE scenario to scan acme/billing."));
@@ -1312,6 +1340,7 @@ async function viewAudit(arg) {
 // --- evaluation -------------------------------------------------------------- //
 
 async function viewEvaluation() {
+  if (isReal()) return viewRealEvaluation();
   const [e, runs] = await Promise.all([api.get("/api/evaluation"), api.get("/api/runs")]);
   const panel = runPanel(runs, {
     title: "Run it live",
@@ -1600,6 +1629,211 @@ function policyPanel(policy) {
   );
 }
 
+// --- real data ------------------------------------------------------------------- //
+// The same components on real public data, next to (never instead of) the synthetic demo.
+
+async function viewRealEvaluation() {
+  const [built, status, runs, saved] = await Promise.all([api.get("/api/real/report"), api.get("/api/real/status"), api.get("/api/runs"), api.get("/api/evaluation")]);
+  const net = status.network;
+  const limit = h(
+    "select",
+    { id: "real-limit" },
+    [["5000", "5,000 flows"], ["20000", "20,000 flows"], ["60000", "60,000 flows"]].map(([value, text]) => h("option", { value, selected: value === "20000" }, text)),
+  );
+  const panel = runPanel(runs, {
+    title: "Run it again",
+    intro: `The result below is what this workspace was built from: the triage model trained on ${built.report.file} and scored on real flows it never saw. Run the same evaluation again with another seed or sample size to see how stable it is; nothing here replaces the model serving the feed.`,
+    kinds: [{ kind: "real_network", label: "Re-run on real flows", hint: "about a minute", payload: () => ({ limit: Number(limit.value) }) }],
+    seed: true,
+    fields: [h("label", { for: "real-limit" }, "Sample"), limit],
+  });
+  const job = runs.jobs.real_network;
+  const rerun = job && job.state === "done" && job.result ? job : null;
+  const shown = rerun || { result: built.report, seed: built.report.seed, elapsed_s: built.report.seconds };
+  return h(
+    "div",
+    { class: "stack" },
+    h("h1", {}, "Evaluation on real data"),
+    h("p", { class: "lede" }, `${net.file || built.report.file} · real labelled network flows. The synthetic evaluation the demo workspace shows is the right-hand column below, for comparison.`),
+    panel,
+    realNetworkResult(shown, saved),
+  );
+}
+
+async function viewKb() {
+  const status = await api.get("/api/real/status");
+  return h("div", { class: "stack" }, h("h1", {}, "Knowledge base"), realKbPanel(status));
+}
+
+async function viewRealCodeScan() {
+  const runs = await api.get("/api/runs");
+  return h("div", { class: "stack" }, h("h1", {}, "Code scan"), realScanPanel(runs));
+}
+
+function needFile(title, status, what) {
+  return section(
+    title,
+    h("p", { class: "meta" }, `${what} is not on this machine yet. It is not bundled: it is large and not ours to redistribute.`),
+    h("p", {}, "Fetch it with ", h("code", {}, `${status.fetch_command} --yes`), " (the script lists what it downloads and from where before doing anything)."),
+  );
+}
+
+function realNetworkResult(job, saved) {
+  const r = job.result;
+  const m = r.metrics;
+  const sh = saved.available ? saved.headline : {};
+  const num = (x, d = 4) => (Number.isFinite(x) ? fmtNumber(x, d) : "—");
+  const pct = (x) => (Number.isFinite(x) ? fmtPercent(x) : "—");
+  const rows = [
+    ["Data", "generated by this project", `${r.dataset}, a real capture`],
+    ["Flows in the held-out test split", "—", fmtNumber(r.test_flows, 0)],
+    ["ROC-AUC", num(sh.roc_auc), num(m.roc_auc)],
+    ["Recall", num(sh.recall), num(m.recall)],
+    ["Precision", num(sh.precision), num(m.precision)],
+    ["Alerts kept off the analyst (alert reduction)", pct(sh.alert_reduction), pct(m.alert_reduction)],
+  ];
+  const c = r.confusion;
+  const families = Object.entries(r.per_family).slice(0, 10);
+  const samples = r.samples.map((x) =>
+    h(
+      "tr",
+      { class: x.correct ? "" : "row-bad" },
+      h("td", {}, x.protocol || "—"),
+      h("td", { class: "num" }, x.dst_port === null || x.dst_port === undefined ? "—" : String(x.dst_port)),
+      h("td", { class: "num" }, Number.isFinite(x.bytes_out) ? fmtNumber(x.bytes_out, 0) : "—"),
+      h("td", { class: "num" }, Number.isFinite(x.duration_s) ? fmtNumber(x.duration_s, 3) : "—"),
+      h("td", {}, x.true_label),
+      h("td", {}, humanize(x.decision)),
+      h("td", { class: "num" }, fmtNumber(x.confidence, 2)),
+      h("td", {}, badge(x.correct ? "completed" : "failed", x.correct ? "right" : "wrong")),
+    ),
+  );
+  return section(
+    `Real-data result — ${r.file}, seed ${job.seed}, ${fmtNumber(job.elapsed_s, 0)} s`,
+    h("p", { class: "meta" }, `${fmtNumber(r.rows_in_file, 0)} flows in the file; ${fmtNumber(r.rows_sampled, 0)} sampled (${fmtPercent(r.attack_share)} attacks); train / validation / test split ${JSON.stringify(r.split)}.`),
+    table(["Metric", "Synthetic (saved report)", "Real (this run)"], rows.map(([name, a, b]) => h("tr", {}, h("td", {}, name), h("td", { class: "num" }, a), h("td", { class: "num" }, b)))),
+    h("div", { class: "grid-2" }, families.length
+      ? barChart({ title: "Recall by attack family (real flows)", categories: families.map(([name]) => name), series: [{ name: "Recall", values: families.map(([, f]) => f.recall) }], yMax: 1, percent: true, describe: "share of each family's held-out flows that reached an analyst" })
+      : null,
+    section("Confusion on the held-out flows", kv([["Attacks caught", String(c.true_positive)], ["Attacks missed", String(c.false_negative)], ["Benign flagged (false alarms)", String(c.false_positive)], ["Benign dismissed", String(c.true_negative)]]))),
+    h("details", {}, h("summary", {}, "A slice of real decisions"), table(["Protocol", "Port", "Bytes out", "Duration s", "True label", "Decision", "Confidence", "Verdict"], samples)),
+    h("ul", { class: "plain" }, r.notes.map((note) => h("li", { class: "meta" }, note))),
+  );
+}
+
+const KB_EXAMPLES = ["phishing attachment", "brute force password guessing", "credential dumping", "lateral movement over remote services"];
+
+function realKbPanel(status) {
+  const kb = status.attack;
+  if (!kb.available) return needFile("Real MITRE ATT&CK knowledge base", status, "MITRE's ATT&CK catalogue");
+  const input = h("input", { type: "search", id: "kb-q", class: "wide-input", maxlength: "200", placeholder: "Describe what you are seeing, or a technique name" });
+  const out = h("div", { class: "kb-out" });
+  async function search(query) {
+    const q = (query ?? input.value).trim();
+    if (q.length < 2) return;
+    input.value = q;
+    replace(out, h("p", { class: "loading" }, kb.built ? "Searching…" : "Searching (the first search builds the index, about ten seconds)…"));
+    try {
+      const result = await api.get(`/api/real/kb/search?q=${encodeURIComponent(q)}&k=5`);
+      kb.built = true;
+      replace(
+        out,
+        h(
+          "div",
+          { class: "grid-2" },
+          kbColumn(`Real MITRE ATT&CK — ${fmtNumber(result.real_documents, 0)} techniques`, "MITRE's own published catalogue; each result links to attack.mitre.org.", result.real),
+          kbColumn(`Bundled corpus — ${fmtNumber(result.curated_documents, 0)} documents`, "The small hand-curated corpus the demo's Investigation Agent cites.", result.curated),
+        ),
+      );
+    } catch (error) {
+      replace(out, errorBox(error));
+    }
+  }
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") search();
+  });
+  return section(
+    "Real MITRE ATT&CK knowledge base",
+    h("p", { class: "meta" }, "The same retrieval (chunking, hybrid ranking, citations) built over MITRE's real catalogue, side by side with the bundled curated corpus."),
+    h("div", { class: "run-controls" }, input, h("button", { class: "btn primary", type: "button", onclick: () => search() }, "Search")),
+    h("div", { class: "row" }, h("span", { class: "meta" }, "Try:"), KB_EXAMPLES.map((q) => h("button", { class: "linkish", type: "button", onclick: () => search(q) }, q))),
+    out,
+  );
+}
+
+function kbColumn(title, note, hits) {
+  return h(
+    "div",
+    { class: "kb-col" },
+    h("h3", {}, title),
+    h("p", { class: "meta" }, note),
+    hits.length
+      ? hits.map((hit) =>
+          h(
+            "article",
+            { class: "kb-hit" },
+            h("div", { class: "kb-head" }, hit.url ? h("a", { href: hit.url, target: "_blank", rel: "noopener noreferrer" }, hit.doc_id) : h("strong", {}, hit.doc_id), " ", hit.title),
+            h("p", { class: "meta" }, `${hit.section} · relevance ${fmtNumber(hit.relevance, 2)}`),
+            h("p", {}, hit.excerpt),
+          ),
+        )
+      : empty("Nothing relevant found."),
+  );
+}
+
+function realScanPanel(runs) {
+  const url = h("input", { type: "url", id: "scan-url", class: "wide-input", maxlength: "300", placeholder: "https://github.com/owner/repository", autocomplete: "off" });
+  const panel = runPanel(runs, {
+    title: "Real code scan — any public GitHub repository",
+    intro: "Paste a public repository. The archive is downloaded from GitHub (25 MB at most) and its Python files are read into memory and parsed by the same analyzer the demo uses. Nothing in the repository is installed or run, and no pull request is opened.",
+    kinds: [{ kind: "real_scan", label: "Scan repository", hint: "usually a few seconds to a minute", payload: () => ({ url: url.value.trim() }), disabledHint: "Real scans are not enabled on this server" }],
+    seed: false,
+    fields: [h("label", { for: "scan-url" }, "Repository"), url],
+  });
+  const job = runs.jobs.real_scan;
+  return h("div", { class: "stack" }, panel, job && job.state === "done" && job.result ? realScanResult(job.result) : null);
+}
+
+function realScanResult(r) {
+  const severities = ["critical", "high", "medium", "low", "info"].filter((sev) => r.by_severity[sev]);
+  const findings = r.findings.map((f) =>
+    h(
+      "tr",
+      {},
+      h("td", {}, badge(f.severity)),
+      h("td", {}, h("a", { href: f.link, target: "_blank", rel: "noopener noreferrer" }, `${f.path}:${f.line}`)),
+      h("td", {}, f.rule_id),
+      h("td", {}, f.cwe),
+      h("td", {}, f.title),
+      h("td", {}, f.patched ? badge("completed", "patch drafted") : badge("info", "report only")),
+      h("td", {}, h("code", { class: "excerpt-inline" }, f.excerpt)),
+    ),
+  );
+  return section(
+    `Result — ${r.repository} (${r.ref}), ${fmtNumber(r.seconds, 0)} s`,
+    kv([
+      ["Repository", h("a", { href: r.url, target: "_blank", rel: "noopener noreferrer" }, r.repository)],
+      ["Scanned", `${fmtNumber(r.files_scanned, 0)} files, ${fmtNumber(r.lines_scanned, 0)} lines${r.skipped_total ? ` (${r.skipped_total} skipped)` : ""}`],
+      ["Findings", `${r.finding_total}${r.finding_total > r.findings.length ? ` (the first ${r.findings.length} are listed)` : ""}`],
+      ["By severity", severities.length ? severities.map((sev) => `${humanize(sev)} ${r.by_severity[sev]}`).join(" · ") : "none"],
+      ["Validated patches", String(r.validated_patches)],
+      r.parse_errors ? ["Files that did not parse", String(r.parse_errors)] : null,
+    ]),
+    r.finding_total ? table(["Severity", "Where", "Rule", "CWE", "Title", "Patch", "Excerpt (untrusted)"], findings) : empty("No findings in the Python files that were scanned."),
+    r.patches.length
+      ? h(
+          "details",
+          {},
+          h("summary", {}, `Drafted patches (${r.patches.length}) — proposals only, none applied or pushed`),
+          r.patches.map((p) =>
+            h("details", { class: "patch" }, h("summary", {}, `${p.path} · ${p.rule_id}`), h("pre", { class: "diff" }, diffLines(p.diff).map((line) => h("span", { class: `d-${line.kind}` }, line.text + "\n"))), p.checks.length ? h("p", { class: "meta" }, `checks passed: ${p.checks.join(", ")}`) : null),
+          ),
+        )
+      : null,
+    h("ul", { class: "plain" }, r.notes.map((note) => h("li", { class: "meta" }, note))),
+  );
+}
+
 const VIEWS = {
   overview: viewOverview,
   scenarios: viewScenarios,
@@ -1612,14 +1846,58 @@ const VIEWS = {
   audit: viewAudit,
   evaluation: viewEvaluation,
   models: viewModels,
+  kb: viewKb,
 };
 
 // --------------------------------------------------------------------------- //
 // Boot
 // --------------------------------------------------------------------------- //
 
+let workspaceWait = null;
+
+// The real-data workspace trains on a real capture and indexes ATT&CK when the server starts,
+// which takes about a minute. Until it is ready the login works but the workspace is "preparing":
+// say so, and carry on by itself when it is done.
+function waitForWorkspace() {
+  if (workspaceWait) clearInterval(workspaceWait);
+  workspaceWait = setInterval(async () => {
+    try {
+      session = await api.get("/api/session");
+    } catch {
+      return;
+    }
+    if (session.workspace === "ready") {
+      clearInterval(workspaceWait);
+      workspaceWait = null;
+      start();
+    } else if (session.workspace === "failed") {
+      clearInterval(workspaceWait);
+      workspaceWait = null;
+      start();
+    }
+  }, 3000);
+}
+
 function start() {
   renderShell();
+  if (session.workspace === "preparing") {
+    replace(
+      mainEl,
+      h(
+        "div",
+        { class: "stack" },
+        h("h1", {}, "Preparing the real-data workspace"),
+        h("p", { class: "lede" }, `Training the triage model on ${session.dataset || "the real capture"} and indexing MITRE's ATT&CK catalogue. This takes about a minute the first time after the server starts; this page carries on by itself.`),
+        h("p", { class: "loading" }, "Working…"),
+      ),
+    );
+    waitForWorkspace();
+    return;
+  }
+  if (session.workspace === "failed") {
+    replace(mainEl, h("div", { class: "stack" }, h("h1", {}, "The real-data workspace could not be built"), errorBox(new Error(session.workspace_error || "unknown error"))));
+    return;
+  }
   route();
 }
 

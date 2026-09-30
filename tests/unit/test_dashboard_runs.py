@@ -120,7 +120,8 @@ def test_seed_and_kind_are_validated(tmp_path):
 def test_evaluation_is_unavailable_without_the_script(tmp_path):
     m = manager(tmp_path, tmp_path / "missing.py")
     state = m.latest()["available"]
-    assert state == {"retrain": True, "eval_quick": False, "eval_full": False}
+    assert (state["retrain"], state["eval_quick"], state["eval_full"]) == (True, False, False)
+    assert state["real_network"] is False and state["real_scan"] is False  # no handler wired
     with pytest.raises(RunsUnavailable):
         m.start(RunKind.QUICK, 1, by="maya")
 

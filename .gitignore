@@ -18,3 +18,7 @@ htmlcov/
 
 # Part 3.3: the evaluation writes its scan artifacts here
 data/artifacts/evaluation.json
+
+# Real public data fetched by scripts/fetch_real_data.py (large, not redistributable here)
+data/real/*
+!data/real/.gitkeep

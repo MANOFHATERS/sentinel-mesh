@@ -28,7 +28,7 @@ python scripts/evaluate.py --n 20000 --cross-dataset --graph --kb --policy \
 python -m sentinel.dashboard      # the Analyst Copilot on http://127.0.0.1:8765/
 ```
 
-`3,312 tests collected and passing` (plus 54 front-end tests under `node --test`, run from pytest),
+`3,381 tests collected and passing` (plus 54 front-end tests under `node --test`, run from pytest),
 ruff clean. One timing test — F-11's 50k-row verification — exceeded its 1 s budget
 under a 4-worker parallel run and passes alone; see the Part 5 caveats.
 
@@ -1454,6 +1454,50 @@ Front end only ([graph.js](../src/sentinel/dashboard/static/js/graph.js),
 - **Found on the way:** the first version animated the force simulation itself, which reads as a
   blink/zoom rather than a build; the layout is now settled first and the *reveal* is the
   animation.
+
+## Part 5.6 — real data: a login decides which data the dashboard shows ✅ COMPLETE
+
+The synthetic demo is unchanged. A second kind of login gets a *whole workspace* built from real
+public data, so the two can be shown one after the other. Code in [real/](../src/sentinel/real/) and
+[dashboard/registry.py](../src/sentinel/dashboard/registry.py), tests in
+`tests/unit/test_real_data.py` and `tests/unit/test_real_workspace.py`.
+
+| Piece | What |
+|---|---|
+| Real users | The demo identity provider offers `real.analyst@` and `real.auditor@` (tenant `real`) only when the real files are on disk; the SSO layer, roles, MFA and audit are the same as for everyone else |
+| Real workspace | `MeshModels.build_real`: a triage model trained on the real training split of UNSW-NB15 (CIC-IDS2017 also supported), MITRE's real ATT&CK catalogue (697 techniques) as the knowledge base, the real held-out flows as the feed (seeded shuffle so it mixes benign and attack) |
+| Registry | The real workspace trains for about a minute, so it builds in the background; until then that login gets a "preparing" page (503 + retry), a failed build is reported as failed, and the synthetic demo is never held back |
+| Interface | Header badge `REAL DATA · UNSW-NB15` / `SYNTHETIC DEMO`; the real sidebar omits Scenarios, Supply chain and Models (no real data behind them, and the API answers 404 for them rather than serve synthetic content under a real label); adds Knowledge base (real vs bundled side by side); Code scan takes any public GitHub URL; Evaluation shows the real evaluation next to the synthetic one |
+| Real code scan | Only `github.com/<owner>/<repo>[/tree/<branch>]`, downloaded from `codeload.github.com` with redirects off and a 25 MB cap; Python files read in memory and parsed, never run; bounded to 300 files / 90k lines; symlinks and skipped directories ignored |
+| Downloads | `scripts/fetch_real_data.py` lists what it fetches and downloads nothing without `--yes`; each file is checked before it is kept |
+
+### Measured on the real data (UNSW-NB15 training partition, 20,000-flow sample, seed 20260928)
+
+```
+ROC-AUC 0.769 (synthetic 0.997)   recall 0.994   precision 0.906   alert reduction 21.9% (synthetic 59.9%)
+confusion on 6,717 held-out flows: 4,750 attacks caught, 30 missed, 495 benign flagged, 1,442 benign dismissed
+real ATT&CK: 697 techniques; "phishing attachment" -> T1566 / T1566.001; "brute force" -> T1110
+real repository scan: pallets/markupsafe 12 files, 0 findings; fportantier/vulpy (a teaching repo of
+  deliberate vulnerabilities) 57 files, 15 findings (6 critical SQL injections), 15 validated patches
+```
+
+The honest reading: the detector still catches almost every attack on real traffic, but it separates
+attack from benign far less cleanly than the synthetic corpus suggests (AUC 0.77, and about a quarter
+of benign flows are flagged). That is what real data does to a model tuned on generated data.
+
+### Limits, stated plainly
+
+* **The UNSW train/test CSV has no IP addresses and no timestamps.** The "asset" on a real incident is
+  the flow record (`unsw-flow-N`), a containment action against it is simulated on the local emulators,
+  and no session-context features exist for this data (per-flow detection only). CIC-IDS2017 has
+  addresses but its official download is behind a form, so it is supported but not fetched.
+* **No real supply chain yet.** A real dependency graph needs SBOM ingestion (PRD Phase 2), so that page
+  and the scripted scenarios are simply not offered to the real login.
+* **The response policy is still trained on the project's own simulator** (its reward table is ours),
+  in both workspaces.
+* **A real repository has no answer key**, so the scanner's recall and false-positive rate are unknown
+  there; only its findings are shown.
+* The real workspace's alert reduction is low because this partition is 68% attacks.
 
 ## Running what exists
 

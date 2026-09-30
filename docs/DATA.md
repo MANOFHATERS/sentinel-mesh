@@ -124,6 +124,27 @@ is unrealistic and undermines credibility" as a risk whose mitigation is being
 explicit about what is real, so: nothing generated here is ever labelled as a real
 capture, and every synthetic alert carries `dataset="cic-ids2017-synthetic"`.
 
+## Real data in the dashboard (Part 5.6)
+
+The **REAL DATA** login uses two downloadable files and one runtime download. All of it is
+optional; the synthetic demo needs none of it.
+
+| What | File / source | Size | Where it goes |
+|---|---|---|---|
+| Real network flows | `UNSW_NB15_training-set.csv` (UNSW Canberra; a public Hugging Face mirror of the official training partition) | ~32 MB | `data/raw/unsw-nb15/` |
+| MITRE ATT&CK for Enterprise | `enterprise-attack.json`, STIX 2.1, from github.com/mitre-attack/attack-stix-data | ~54 MB | `data/real/` |
+| A real repository | fetched at scan time from `codeload.github.com` for the URL you paste | 25 MB cap | memory only |
+
+`python scripts/fetch_real_data.py` lists these and downloads nothing without `--yes`; each file is
+checked (size and shape) before it is kept. CIC-IDS2017 works too (see above) but its official
+download is behind a form, so it is not fetched automatically; put its CSVs in
+`data/raw/cic-ids2017/`.
+
+What a real run cannot tell you: the UNSW train/test CSVs carry no capture timestamps, so the
+session-context features the synthetic corpus has do not exist for it (per-flow detection only);
+and a real repository has no answer key, so scanner recall and false-positive rate are unknown.
+Results are reported as measured, whatever they are.
+
 ## Other sources (Part 2)
 
 | Source | Use | Status |
