@@ -209,13 +209,55 @@ function renderShell() {
   ]);
 }
 
-function signOut() {
+let ssoRefreshToken = null;
+let ssoRefreshTimer = null;
+
+function stopSsoRefresh() {
+  if (ssoRefreshTimer) clearTimeout(ssoRefreshTimer);
+  ssoRefreshTimer = null;
+  ssoRefreshToken = null;
+}
+
+// SSO sessions are short-lived: renew the access token shortly before it lapses, and
+// fall back to the login page (which is one click at the identity provider) if the
+// refresh token is refused — expired, revoked, or the account was deprovisioned.
+function scheduleSsoRefresh(expiresIn) {
+  if (ssoRefreshTimer) clearTimeout(ssoRefreshTimer);
+  ssoRefreshTimer = setTimeout(async () => {
+    try {
+      const tokens = await api.post("/auth/refresh", { refresh_token: ssoRefreshToken });
+      adoptSsoTokens(tokens);
+    } catch {
+      signOut("Your session ended. Sign in again.");
+    }
+  }, Math.max(5, expiresIn * 0.8) * 1000);
+}
+
+function adoptSsoTokens(tokens) {
+  api.signIn(tokens.access_token);
+  ssoRefreshToken = tokens.refresh_token;
+  scheduleSsoRefresh(tokens.expires_in);
+}
+
+function signOut(message) {
+  // Best effort: tell the server to revoke the session; sign out locally regardless.
+  if (ssoRefreshToken) api.post("/auth/logout").catch(() => {});
+  stopSsoRefresh();
   api.signOut();
   session = null;
   // The next person to sign in starts at the Overview, not wherever the last one left off.
   window.history.replaceState(null, "", window.location.pathname + window.location.search);
-  renderLogin();
+  renderLogin(typeof message === "string" ? message : undefined);
 }
+
+const SSO_ERRORS = {
+  mfa_required: "Sign-in needs a second factor. Complete MFA at your identity provider and try again.",
+  no_role: "Your account is not in a group that grants access to Sentinel Mesh. Ask an administrator.",
+  no_tenant: "Your account is not assigned to a workspace here. Ask an administrator.",
+  deprovisioned: "Your account has been deactivated.",
+  idp_unreachable: "The identity provider could not be reached. Try again shortly.",
+  denied: "Sign-in was refused.",
+};
 
 function renderLogin(message) {
   stopRefresh();
@@ -229,6 +271,15 @@ function renderLogin(message) {
     placeholder: "Bearer token printed by python -m sentinel.dashboard",
   });
   const status = h("p", { class: "login-status", role: "status" }, message || "");
+  const ssoBox = h("div", { class: "sso-box" });
+  const tokenBox = h(
+    "details",
+    { class: "token-box", open: true },
+    h("summary", {}, "Use an API token instead"),
+    h("label", { for: "token" }, "Token"),
+    input,
+    h("button", { class: "btn", type: "submit" }, "Sign in with token"),
+  );
   const form = h(
     "form",
     {
@@ -250,14 +301,31 @@ function renderLogin(message) {
     },
     h("span", { class: "logo", "aria-hidden": "true" }, "S"),
     h("h1", {}, "Sentinel Mesh"),
-    h("p", { class: "sub" }, "Analyst Copilot · sign in with your dashboard token"),
-    h("label", { for: "token" }, "Token"),
-    input,
-    h("button", { class: "btn primary", type: "submit" }, "Sign in"),
+    h("p", { class: "sub" }, "Analyst Copilot"),
+    ssoBox,
+    tokenBox,
     status,
   );
   append(root, h("div", { class: "login-wrap" }, form));
-  input.focus();
+  api
+    .get("/auth/config")
+    .then((cfg) => {
+      if (cfg.sso) {
+        replace(
+          ssoBox,
+          h("a", { class: "btn primary block", href: "/auth/login" }, "Sign in with SSO"),
+          h("p", { class: "meta" }, cfg.mfa_required ? "Your organisation's identity provider signs you in, with MFA." : "Your organisation's identity provider signs you in."),
+        );
+      }
+      tokenBox.hidden = !cfg.token_login;
+      if (cfg.sso && cfg.token_login) tokenBox.open = false;
+      else if (cfg.token_login) tokenBox.open = true;
+      if (!cfg.sso) input.focus();
+    })
+    .catch(() => {
+      tokenBox.hidden = false;
+      tokenBox.open = true;
+    });
 }
 
 function stopRefresh() {
@@ -1029,7 +1097,10 @@ async function viewWire() {
 
 async function viewAudit(arg) {
   const after = Number(arg || 0) || 0;
-  const [page, verify] = await Promise.all([api.get(`/api/audit?after=${after}&limit=100`), api.get("/api/audit/verify")]);
+  const [page, verify, signins] = await Promise.all([api.get(`/api/audit?after=${after}&limit=100`), api.get("/api/audit/verify"), api.get("/api/auth/audit")]);
+  const signinRows = signins.items.slice(0, 25).map((e) =>
+    h("tr", e.outcome === "denied" ? { class: "row-bad" } : {}, h("td", {}, fmtTime(new Date(e.ts * 1000).toISOString())), h("td", {}, humanize(e.event)), h("td", {}, e.principal || "—"), h("td", {}, badge(e.outcome === "success" ? "executed" : "failed", e.outcome)), h("td", {}, e.detail || "")),
+  );
   const rows = page.items.map((r) =>
     h(
       "tr",
@@ -1056,6 +1127,13 @@ async function viewAudit(arg) {
       ` Ungated executions: ${verify.ungated_executions.length}.`,
       verify.findings.map((f) => h("div", {}, f)),
     ),
+    signins.enabled
+      ? section(
+          "Sign-in activity",
+          h("p", { class: "meta" }, signins.intact ? "Sign-in chain verified." : "Sign-in chain BROKEN."),
+          table(["When", "Event", "Who", "Outcome", "Detail"], signinRows),
+        )
+      : null,
     table(["Seq", "Recorded", "Event", "Actor", "Subject", "Payload", "Row hash"], rows),
     h(
       "div",
@@ -1305,7 +1383,33 @@ function start() {
 
 window.addEventListener("hashchange", route);
 
+async function finishSso(code) {
+  // The handoff code arrived in the URL fragment (never sent to a server). Swap it,
+  // once, for the tokens, and take it out of the address bar and history.
+  window.history.replaceState(null, "", window.location.pathname + window.location.search);
+  try {
+    adoptSsoTokens(await api.post("/auth/exchange", { code }));
+    session = await api.get("/api/session");
+    start();
+  } catch {
+    stopSsoRefresh();
+    api.signOut();
+    renderLogin("Sign-in could not be completed. Try again.");
+  }
+}
+
 (async function boot() {
+  const fragment = new URLSearchParams(window.location.hash.replace(/^#\/?/, ""));
+  if (fragment.get("sso")) {
+    await finishSso(fragment.get("sso"));
+    return;
+  }
+  if (fragment.get("sso_error")) {
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    api.signOut();
+    renderLogin(SSO_ERRORS[fragment.get("sso_error")] || SSO_ERRORS.denied);
+    return;
+  }
   if (!api.hasToken()) {
     renderLogin();
     return;

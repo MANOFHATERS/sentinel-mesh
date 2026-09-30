@@ -27,6 +27,7 @@ python -m pytest -q
 python scripts/evaluate.py --n 20000 --cross-dataset --graph --kb --policy \
     --agents --codescan --supplychain --connectors --dashboard
 python -m sentinel.dashboard   # Analyst Copilot: prints tokens, serves http://127.0.0.1:8765/
+python -m sentinel.dashboard --dev-idp   # same, with SSO through a demo identity provider
 ```
 
 No datasets, no API keys, **no LLM call**, no Redis, **no torch**, and no outbound

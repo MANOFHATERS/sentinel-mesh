@@ -47,6 +47,7 @@ from sentinel.dashboard import views
 from sentinel.dashboard.auth import AuthError, Identity, TokenRegistry
 from sentinel.dashboard.lab import model_report
 from sentinel.dashboard.scenarios import ASSET_INVENTORY, ScenarioName
+from sentinel.dashboard.sso import SsoService, install_sso
 from sentinel.dashboard.workspace import Conflict, NotFound, Workspace, WorkspaceError
 
 __all__ = ["STATIC_DIR", "create_app"]
@@ -92,6 +93,7 @@ def create_app(
     tokens: TokenRegistry,
     *,
     evaluation_path: Path | None = None,
+    sso: SsoService | None = None,
 ) -> FastAPI:
     """Build the app. Every tenant a token names must have a workspace."""
     missing = sorted(tokens.tenants - set(workspaces))
@@ -152,7 +154,13 @@ def create_app(
     # --- dependencies ------------------------------------------------------- #
 
     def identity(authorization: Annotated[str | None, Header()] = None) -> Identity:
-        return tokens.authenticate(authorization)
+        # Static tokens are API keys for machines; people arrive with an SSO session.
+        try:
+            return tokens.authenticate(authorization)
+        except AuthError:
+            if sso is None:
+                raise
+            return sso.sessions.authenticate(authorization)
 
     def workspace(who: Annotated[Identity, Depends(identity)]) -> Workspace:
         # Resolved from the identity alone: there is no tenant in any request.
@@ -177,6 +185,14 @@ def create_app(
     def session(who: Who) -> dict[str, Any]:
         return {"principal": who.principal, "tenant_id": who.tenant_id,
                 "role": who.role.value, "can_act": who.can_act}
+
+    @app.get("/api/auth/audit")
+    def auth_audit(who: Who) -> dict[str, Any]:
+        """Who signed in, was refused, refreshed or was deprovisioned — this tenant's rows."""
+        if sso is None:
+            return {"enabled": False, "intact": True, "items": []}
+        return {"enabled": True, "intact": sso.audit.verify(),
+                "items": sso.audit.events(tenant=who.tenant_id)}
 
     @app.get("/api/overview")
     def overview(ws: Ws) -> dict[str, Any]:
@@ -292,6 +308,15 @@ def create_app(
         # Tenant-agnostic training records, but still behind the token: the page
         # says what this deployment trained, which is not public information.
         return model_report(ws.models, policy=ws.models.policy)
+
+    # --- sign-in ------------------------------------------------------------------- #
+
+    if sso is not None:
+        install_sso(app, sso, static_tokens=len(tokens) > 0)
+    else:
+        @app.get("/auth/config")
+        def auth_config() -> dict[str, Any]:
+            return {"sso": False, "token_login": True, "mfa_required": False}
 
     # --- the page ------------------------------------------------------------------ #
 

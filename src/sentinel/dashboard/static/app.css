@@ -466,3 +466,13 @@ tr.row-good td { background: var(--good-bg); }
 .chart-holder.hovering .crosshair, .chart-holder.hovering .dot { visibility: visible; }
 
 .readonly-banner { padding: 8px 24px; background: var(--warn-bg); color: var(--warn); font-size: 0.9rem; border-bottom: 1px solid var(--border); }
+
+/* --- single sign-on --------------------------------------------------------------- */
+
+.sso-box { display: flex; flex-direction: column; gap: 6px; }
+.btn.block { display: block; text-align: center; text-decoration: none; }
+.token-box { border-top: 1px solid var(--border); padding-top: 10px; }
+.token-box summary { color: var(--muted); font-size: 0.9rem; }
+.token-box input { width: 100%; margin: 6px 0 10px; box-sizing: border-box; }
+.login ul { padding-left: 18px; }
+.login li { margin: 8px 0; }

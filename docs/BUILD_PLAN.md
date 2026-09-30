@@ -1353,6 +1353,39 @@ dark mode.
 
 ---
 
+## Part 5.3 — single sign-on, SCIM and short-lived sessions ✅ COMPLETE
+
+Until now people signed in by pasting a bearer token the server printed at start-up. That
+is right for a machine and wrong for a person, so the dashboard now signs people in the
+way a SOC product is expected to. Code in [dashboard/sso.py](../src/sentinel/dashboard/sso.py),
+tests in `tests/unit/test_dashboard_sso.py`.
+
+| Concern | What it does |
+|---|---|
+| SSO (OIDC) | Authorization-code + PKCE + `state` + `nonce`. ID token checked for signature (JWKS, RS256/ES256 only — `alg: none` and HMAC-confusion refused), issuer, audience, expiry, nonce, verified email |
+| Roles from groups | `SOC-Analyst` → analyst, `Auditor` → viewer (`SENTINEL_OIDC_GROUPS`). No mapped group → refused, not defaulted. Both groups → the more privileged role |
+| MFA | `amr`/`acr` must show a second factor (`require_mfa`, on by default) |
+| Provisioning (SCIM 2.0) | `/scim/v2/Users` create/list/filter/patch/delete under its own token; deactivating a user revokes their live sessions at once and blocks sign-in, JIT provisioning can be switched off |
+| Sessions | 15-minute access token, rotating refresh token, absolute lifetime; a refresh token used twice revokes the whole session. Only digests stored |
+| Audit | Every sign-in, refusal, refresh, logout and SCIM change goes to a hash-chained log, shown on the Audit page |
+| Static tokens | Kept as API keys for machines; with SSO on they exist only if `SENTINEL_DASHBOARD_TOKENS` is set |
+
+The browser still holds a bearer token and sends it in a header (no cookie, so no CSRF
+surface). It reaches the page as a one-time handoff code in the URL *fragment*, exchanged
+once over `POST`.
+
+`python -m sentinel.dashboard --dev-idp` mounts a stand-in identity provider
+(`dashboard/devidp.py`) speaking real OIDC, with four demo people: an analyst, an auditor,
+an analyst with no MFA (refused) and a contractor with no group (refused). Point a real
+provider at it with `SENTINEL_OIDC_ISSUER` / `_CLIENT_ID` / `_CLIENT_SECRET`.
+
+**Known limits, stated plainly.** Sessions, the SCIM directory and the audit chain are
+in memory (a restart signs everyone out; production keeps them in a database). Roles are
+read at sign-in, so a group change applies at the next sign-in. The refresh token lives
+only in page memory, so a reload within 15 minutes keeps the session and a reload after
+that goes back through the provider. Only the demo provider has been tested against; a
+real Okta / Azure AD tenant has not.
+
 ## Running what exists
 
 ```bash
