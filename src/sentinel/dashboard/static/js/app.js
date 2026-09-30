@@ -544,6 +544,8 @@ async function draw(view, arg, token, { quiet = false } = {}) {
     if (token !== renderToken) return;
     // A background refresh that changed nothing leaves the DOM alone.
     if (quiet && content.textContent === mainEl.textContent) return;
+    // A page the reader just opened animates in; a background refresh must not replay it.
+    if (!quiet && content.classList) content.classList.add("page-enter");
     replace(mainEl, content);
   } catch (error) {
     if (token !== renderToken) return;

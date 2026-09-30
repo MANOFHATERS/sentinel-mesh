@@ -14,7 +14,7 @@ The design idea that everything else follows from: **an AI system that can act m
 | At a glance | |
 |---|---|
 | Source code | ~37,000 lines of Python in `src/` |
-| Tests | ~29,500 lines · **3,289 Python tests + 38 front-end tests**, ruff clean |
+| Tests | ~29,500 lines · **3,312 Python tests + 54 front-end tests**, ruff clean |
 | Documents | `README.md`, `docs/BUILD_PLAN.md` (ledger, ~1,450 lines), `docs/ARCHITECTURE.md`, `docs/DATA.md`, this report |
 | Commits on `main` | Parts 1 → 5.3, one part per session, each pushed after the full suite and the evaluation gate passed |
 | PRD status | **Every Must/Should criterion F-01 … F-12 met and measured by one command** (`scripts/evaluate.py` exits non-zero if any gate fails). F-13 (PPO) and F-14 (live production integration) are post-sprint by the PRD's own scoping |
@@ -112,6 +112,11 @@ The browser still uses a bearer header (no cookie, so no CSRF surface); the toke
 - **Live runs:** the Models and Evaluation pages open on saved results; an analyst can re-train the models under any seed (~12 s), run a quick evaluation (~18 s) or the full evaluation (~2.5 min) and see the result beside the saved one. One run at a time, cancellable, and evaluations run as a subprocess of the one pipeline so the saved report is never overwritten.
 - **Two findings, both fixed:** a crash-recovery experiment that only worked for some seeds, and agent-layer checks that drove the *first* N flows of the test split (under seed 7 almost all benign, so three gates failed). They now sample evenly across the split; the full evaluation passes every gate under seed 7 and under the published seed.
 
+### Part 5.5 — Motion *(built in this working session)*
+- **Supply-chain map:** computed first, then grown node by node from the highest-risk node along the graph's own links (each new node is linked to one already shown); every node pops in and every new link flashes. Zoom (+, −, wheel, keys), pan, Fit, Rebuild and Skip; hovering a node lights up its connections.
+- **Charts:** bars grow from the baseline and lines draw left to right the first time they scroll into view, on every visit to the Models and Evaluation pages.
+- **Pages:** every page animates in when opened (headings, tiles, cards, table rows staggered); a background refresh never replays it. All motion is CSS, off under `prefers-reduced-motion`.
+
 ---
 
 ## 4. Measured results
@@ -157,7 +162,7 @@ The ledger records every finding that changed the design; the notable ones:
 
 ```bash
 pip install -e ".[dev,api]"
-python -m pytest -q                                   # 3,289 tests (+38 front-end)
+python -m pytest -q                                   # 3,312 tests (+54 front-end)
 python scripts/evaluate.py --n 20000 --cross-dataset --graph --kb --policy \
     --agents --codescan --supplychain --connectors --dashboard
 

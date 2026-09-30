@@ -1,8 +1,9 @@
 // Renders the supply-chain map as SVG from the force layout.
 //
-// The map is built in front of the reader: the simulation is stepped a few ticks per
-// animation frame, so the nodes spread out from the centre and the drawing refits as it
-// grows, then settles on exactly the picture the synchronous layout would give. It can be
+// The layout is computed first, then the map is *grown* in front of the reader: it starts
+// at the highest-risk node and adds one node at a time along the graph's own connections
+// (each new node is linked to one already on screen), so the exposure spreads outward the
+// way the risk does. Each node pops in and each new link flashes as it appears. It can be
 // zoomed (buttons, mouse wheel, + / - keys) and panned (drag), and hovering or focusing a
 // node lights up its connections and dims the rest.
 //
@@ -28,10 +29,47 @@ export function pathEdges(paths) {
   return keys;
 }
 
+// The order in which to grow the map: breadth-first from the highest-risk node, so every
+// node after the first of its component appears next to one already shown. Components are
+// started highest-risk first. Deterministic: ties break on id. links: [{source, target}] ids.
+export function revealOrder(nodes, links) {
+  const risk = new Map(nodes.map((n) => [n.id, Number.isFinite(n.risk) ? n.risk : 0]));
+  const adjacent = new Map(nodes.map((n) => [n.id, []]));
+  for (const { source, target } of links) {
+    if (!adjacent.has(source) || !adjacent.has(target) || source === target) continue;
+    adjacent.get(source).push(target);
+    adjacent.get(target).push(source);
+  }
+  const byRisk = (a, b) => risk.get(b) - risk.get(a) || (a < b ? -1 : a > b ? 1 : 0);
+  const seeds = nodes.map((n) => n.id).sort(byRisk);
+  const seen = new Set();
+  const order = [];
+  for (const seed of seeds) {
+    if (seen.has(seed)) continue;
+    seen.add(seed);
+    const queue = [seed];
+    for (let head = 0; head < queue.length; head += 1) {
+      const id = queue[head];
+      order.push(id);
+      for (const next of [...new Set(adjacent.get(id))].sort(byRisk)) {
+        if (!seen.has(next)) {
+          seen.add(next);
+          queue.push(next);
+        }
+      }
+    }
+  }
+  return order;
+}
+
+// How long the build takes: long enough to watch a small graph grow, bounded for a big one.
+export function buildDuration(nodeCount) {
+  return Math.min(6000, Math.max(2500, nodeCount * 260));
+}
+
 const WIDTH = 900;
 const HEIGHT = 620;
 const MAX_TICKS = 300;
-const FRAME_BUDGET_MS = 12;
 const ZOOM_STEP = 1.4;
 const LABELS_ALL_AT = 2.2;
 
@@ -52,7 +90,7 @@ export function renderGraph(data, { onSelect, selected, animate = true } = {}) {
     linkDistance: many ? 22 : 46,
     charge: many ? -26 : -90,
     radius: nodeRadius,
-  });
+  }).run(MAX_TICKS);
   const highlighted = pathEdges(data.highlight);
   const onPath = new Set((data.highlight || []).flat());
   const advisoryPackage = data.advisory ? data.advisory.package_id : null;
@@ -257,26 +295,61 @@ export function renderGraph(data, { onSelect, selected, animate = true } = {}) {
   const zoomInBtn = h("button", { class: "map-btn", type: "button", "aria-label": "Zoom in", title: "Zoom in", onclick: () => zoom(ZOOM_STEP) }, "+");
   const zoomOutBtn = h("button", { class: "map-btn", type: "button", "aria-label": "Zoom out", title: "Zoom out", onclick: () => zoom(1 / ZOOM_STEP) }, "−");
   const fitBtn = h("button", { class: "map-btn wide", type: "button", "aria-label": "Fit the whole graph", title: "Fit to view", onclick: fit }, "Fit");
-  const rebuildBtn = h("button", { class: "map-btn wide", type: "button", "aria-label": "Rebuild the layout", title: "Rebuild the layout", onclick: () => rebuild() }, "↻ Rebuild");
+  const rebuildBtn = h("button", { class: "map-btn wide", type: "button", "aria-label": "Rebuild the graph step by step", title: "Watch the graph build again", onclick: () => rebuild() }, "↻ Rebuild");
+  const skipBtn = h("button", { class: "map-btn wide", type: "button", "aria-label": "Skip the build animation", title: "Skip to the finished graph", onclick: () => finishBuild(), hidden: true }, "Skip ⏭");
   const readout = h("span", { class: "map-readout", "aria-live": "off" }, "100%");
   const status = h("span", { class: "map-status", role: "status" }, "");
-  const controls = h("div", { class: "map-controls" }, zoomInBtn, zoomOutBtn, fitBtn, rebuildBtn, readout);
+  const controls = h("div", { class: "map-controls" }, skipBtn, zoomInBtn, zoomOutBtn, fitBtn, rebuildBtn, readout);
   const element = h("div", { class: "graph-map" }, controls, status, svg);
 
-  // --- the build animation ---------------------------------------------------------- //
+  // --- the step-by-step build ------------------------------------------------------ //
+  const order = revealOrder(data.nodes, sim.links.map((l) => ({ source: l.source.id, target: l.target.id })));
+  const rank = new Map(order.map((id, i) => [id, i]));
+  const nodeIndex = new Map(sim.nodes.map((n, i) => [n.id, i]));
+  // A link appears with whichever of its two ends comes later in the order.
+  const edgesAtStep = order.map(() => []);
+  sim.links.forEach((l, i) => edgesAtStep[Math.max(rank.get(l.source.id), rank.get(l.target.id))].push(i));
+
   let frame = 0;
+  let started = null;
   let orphanFrames = 0;
   let building = false;
+  let shownNodes = 0;
+  let shownLinks = 0;
+  const duration = buildDuration(order.length);
+
+  function hideAll() {
+    nodeEls.forEach((n) => {
+      n.classList.add("pending");
+      n.classList.remove("enter");
+    });
+    edgeEls.forEach((e) => {
+      e.classList.add("pending");
+      e.classList.remove("enter");
+    });
+    shownNodes = 0;
+    shownLinks = 0;
+  }
+
+  function showUpTo(count, animated) {
+    for (; shownNodes < count; shownNodes += 1) {
+      const node = nodeEls[nodeIndex.get(order[shownNodes])];
+      node.classList.remove("pending");
+      if (animated) node.classList.add("enter");
+      for (const e of edgesAtStep[shownNodes]) {
+        edgeEls[e].classList.remove("pending");
+        if (animated) edgeEls[e].classList.add("enter");
+        shownLinks += 1;
+      }
+    }
+  }
 
   function finishBuild() {
     building = false;
-    edgeLayer.setAttribute("opacity", "1");
-    hotLayer.setAttribute("opacity", "1");
+    cancelAnimationFrame(frame);
+    showUpTo(order.length, false);
     status.textContent = "";
-    base = fitBox(sim.bounds(24));
-    if (autoFit) box = base;
-    paint();
-    applyView();
+    skipBtn.hidden = true;
   }
 
   function step() {
@@ -290,43 +363,32 @@ export function renderGraph(data, { onSelect, selected, animate = true } = {}) {
       return;
     }
     orphanFrames = 0;
-    const started = performance.now();
-    let ticks = 0;
-    while (!sim.settled(MAX_TICKS) && ticks < 12 && (ticks === 0 || performance.now() - started < FRAME_BUDGET_MS)) {
-      sim.tick();
-      ticks += 1;
-    }
-    const progress = Math.min(1, sim.ticks / 120); // edges fade in over the first 120 ticks
-    edgeLayer.setAttribute("opacity", progress.toFixed(2));
-    hotLayer.setAttribute("opacity", "1");
-    status.textContent = `Building the layout… ${Math.min(99, Math.round((sim.ticks / MAX_TICKS) * 100))}%`;
-    if (autoFit) {
-      base = fitBox(sim.bounds(24));
-      box = base;
-    }
-    paint();
-    applyView();
-    if (sim.settled(MAX_TICKS)) finishBuild();
+    const now = performance.now();
+    if (started === null) started = now;
+    const target = Math.min(order.length, Math.ceil(Math.min(1, (now - started) / duration) * order.length));
+    showUpTo(target, true);
+    status.textContent = `Building the graph — ${shownNodes} of ${order.length} nodes · ${shownLinks} links`;
+    if (shownNodes >= order.length) finishBuild();
     else frame = requestAnimationFrame(step);
   }
 
-  function rebuild() {
-    cancelAnimationFrame(frame);
-    sim.reset(); // the deterministic starting arrangement: same picture at the end
-    autoFit = true;
-    startBuild();
-  }
-
   function startBuild() {
-    if (!animate || prefersReducedMotion()) {
-      sim.run(MAX_TICKS);
-      finishBuild();
+    cancelAnimationFrame(frame);
+    hideAll();
+    started = null;
+    if (!animate || prefersReducedMotion() || !order.length) {
+      showUpTo(order.length, false);
       return;
     }
     building = true;
-    paint();
-    applyView();
+    skipBtn.hidden = false;
+    status.textContent = `Building the graph — 0 of ${order.length} nodes`;
     frame = requestAnimationFrame(step);
+  }
+
+  function rebuild() {
+    building = false;
+    startBuild();
   }
 
   paint();

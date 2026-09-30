@@ -52,6 +52,23 @@ class FakeElement extends FakeNode {
   getAttribute(name) {
     return this.attributes.has(name) ? this.attributes.get(name) : null;
   }
+  // Enough of DOMTokenList for the code under test: it edits the class attribute.
+  get classList() {
+    const element = this;
+    const read = () => (element.getAttribute("class") || "").split(/\s+/).filter(Boolean);
+    const write = (names) => element.setAttribute("class", names.join(" "));
+    return {
+      add: (name) => write([...new Set([...read(), name])]),
+      remove: (name) => write(read().filter((n) => n !== name)),
+      contains: (name) => read().includes(name),
+      toggle(name, force) {
+        const on = force === undefined ? !read().includes(name) : Boolean(force);
+        if (on) this.add(name);
+        else this.remove(name);
+        return on;
+      },
+    };
+  }
   addEventListener(type, fn) {
     this.listeners.set(type, fn);
   }

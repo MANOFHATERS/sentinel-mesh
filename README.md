@@ -3,7 +3,7 @@
 An autonomous, agentic security operations platform for the mid-market and the MSSPs
 that protect it. Implementation of [`Sentinel_Mesh_PRD.docx`](Sentinel_Mesh_PRD.docx).
 
-**Status: Parts 1–5.4 complete; every PRD acceptance criterion F-01 to F-12 is met** — the foundation (ingestion, contracts,
+**Status: Parts 1–5.5 complete; every PRD acceptance criterion F-01 to F-12 is met** — the foundation (ingestion, contracts,
 tamper-evident audit, anomaly detection), the intelligence core (deep detector,
 supply-chain GNN, RAG knowledge base, bandit response policy, diffusion augmentation),
 the full agent layer (**all five PRD agents** across three checkpointed graphs sharing
@@ -20,7 +20,7 @@ session picks up, and [docs/PROJECT_REPORT.md](docs/PROJECT_REPORT.md) for a com
 what was built.
 
 ```
-3,289 Python tests + 38 front-end tests · ruff clean
+3,312 Python tests + 54 front-end tests · ruff clean
 ```
 
 ## What works today

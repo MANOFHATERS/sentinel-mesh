@@ -28,7 +28,7 @@ python scripts/evaluate.py --n 20000 --cross-dataset --graph --kb --policy \
 python -m sentinel.dashboard      # the Analyst Copilot on http://127.0.0.1:8765/
 ```
 
-`3,289 tests collected and passing` (plus 38 front-end tests under `node --test`, run from pytest),
+`3,312 tests collected and passing` (plus 54 front-end tests under `node --test`, run from pytest),
 ruff clean. One timing test — F-11's 50k-row verification — exceeded its 1 s budget
 under a 4-worker parallel run and passes alone; see the Part 5 caveats.
 
@@ -1431,6 +1431,29 @@ writes it); the only user value reaching a command line is an integer seed.
    12.12 s; connectors 29 gated); the detector, graph, knowledge-base, code-scan and policy
    numbers are unchanged. Earlier parts' ledger blocks above keep the numbers they were
    measured with at the time.
+
+## Part 5.5 — motion: the map grows, the charts draw, the pages animate in ✅ COMPLETE
+
+Front end only ([graph.js](../src/sentinel/dashboard/static/js/graph.js),
+[viewport.js](../src/sentinel/dashboard/static/js/viewport.js),
+[charts.js](../src/sentinel/dashboard/static/js/charts.js), `app.css`); tests in
+`tests/js/viewport.test.mjs` and `tests/js/graph.test.mjs`.
+
+- **Supply-chain map:** the force layout is computed up front, then the map is revealed in
+  `revealOrder` — breadth-first from the highest-risk node, so every node after the first of its
+  component appears next to one already on screen — with a pop for each node and a flash for each
+  new link; 2.5–6 s depending on size, with a Skip button and a Rebuild button. Zoom in/out
+  (buttons, wheel, keys), drag to pan, Fit; hovering or selecting a node lights up its links.
+  Selecting a node updates in place, so it no longer rebuilds the graph or resets the zoom.
+- **Charts:** hidden until scrolled into view (`IntersectionObserver`), then bars grow from the
+  baseline and lines draw left to right (`pathLength=1` + a CSS dash animation). They replay on
+  every visit because the page is rebuilt on every visit.
+- **Pages:** a route change adds `page-enter` to the new content, staggering headings, tiles,
+  cards and table rows in. A quiet background refresh does not add it, so the live feed does not
+  make the page replay. All of it is CSS, disabled under `prefers-reduced-motion`.
+- **Found on the way:** the first version animated the force simulation itself, which reads as a
+  blink/zoom rather than a build; the layout is now settled first and the *reveal* is the
+  animation.
 
 ## Running what exists
 

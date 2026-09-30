@@ -73,6 +73,24 @@ export function formatTick(t) {
   return Number.isInteger(t) ? String(t) : String(Number(t.toFixed(4)));
 }
 
+// Charts draw themselves the first time they scroll into view: bars grow from the
+// baseline and lines draw left to right (CSS animations, gated on the ``in`` class). Where
+// IntersectionObserver is missing they are simply shown.
+function revealWhenVisible(figure) {
+  if (typeof IntersectionObserver === "undefined") {
+    figure.classList.add("in");
+    return figure;
+  }
+  const observer = new IntersectionObserver((entries) => {
+    if (entries.some((entry) => entry.isIntersecting)) {
+      figure.classList.add("in");
+      observer.disconnect();
+    }
+  });
+  observer.observe(figure);
+  return figure;
+}
+
 const W = 640;
 const H = 250;
 const M = { top: 16, right: 92, bottom: 34, left: 52 };
@@ -133,7 +151,7 @@ export function lineChart({ title, x, series, xLabel, yLabel, yMin = null, descr
   axes(svg, xTicks, yTicks, sx, sy, xLabel, yLabel);
   clean.forEach((sr, i) => {
     const d = sr.values.map((v, j) => `${j ? "L" : "M"}${sx(x[j]).toFixed(1)},${sy(v).toFixed(1)}`).join("");
-    svg.appendChild(s("path", { d, class: `line series-${i + 1}${sr.dashed ? " dashed" : ""}` }));
+    svg.appendChild(s("path", { d, pathLength: "1", class: `line series-${i + 1}${sr.dashed ? " dashed" : ""}` }));
   });
   // Selective direct labels: each series' name at its end, in text ink (not the series
   // colour), pushed apart when two lines finish close together.
@@ -186,13 +204,15 @@ export function lineChart({ title, x, series, xLabel, yLabel, yMin = null, descr
   for (let i = 0; i < x.length; i += step) rows.push([formatValue(x[i], 0), ...clean.map((sr) => formatValue(sr.values[i]))]);
   if ((x.length - 1) % step) rows.push([formatValue(x[x.length - 1], 0), ...clean.map((sr) => formatValue(sr.values[x.length - 1]))]);
 
-  return h(
-    "figure",
-    { class: "chart" },
-    h("figcaption", {}, h("strong", {}, title), describe ? h("span", { class: "meta" }, ` — ${describe}`) : null),
-    legend(clean),
-    holder,
-    tableView([xLabel || "x", ...clean.map((sr) => sr.name)], rows),
+  return revealWhenVisible(
+    h(
+      "figure",
+      { class: "chart" },
+      h("figcaption", {}, h("strong", {}, title), describe ? h("span", { class: "meta" }, ` — ${describe}`) : null),
+      legend(clean),
+      holder,
+      tableView([xLabel || "x", ...clean.map((sr) => sr.name)], rows),
+    ),
   );
 }
 
@@ -226,7 +246,7 @@ export function barChart({ title, categories, series, yLabel, yMax = null, descr
       const x0 = center - groupW / 2 + k * (barW + 2);
       const top = sy(Math.max(v, 0));
       const height = Math.max(H - M.bottom - top, 1);
-      const bar = s("rect", { x: x0.toFixed(1), y: top.toFixed(1), width: barW.toFixed(1), height: height.toFixed(1), rx: "4", class: `bar series-${k + 1}`, tabindex: "0" });
+      const bar = s("rect", { x: x0.toFixed(1), y: top.toFixed(1), width: barW.toFixed(1), height: height.toFixed(1), rx: "4", class: `bar series-${k + 1} d${Math.min(c * series.length + k, 15)}`, tabindex: "0" });
       const showTip = () => {
         tip.replaceChildren(h("strong", {}, cat), h("div", {}, h("span", { class: `key series-${k + 1}` }), `${sr.name}: ${fmt(v)}`));
         tip.classList.add("visible");
@@ -243,12 +263,14 @@ export function barChart({ title, categories, series, yLabel, yMax = null, descr
     svg.appendChild(s("text", { x: center, y: H - M.bottom + 16, class: "tick", "text-anchor": "middle" }, cat));
   });
 
-  return h(
-    "figure",
-    { class: "chart" },
-    h("figcaption", {}, h("strong", {}, title), describe ? h("span", { class: "meta" }, ` — ${describe}`) : null),
-    legend(series),
-    h("div", { class: "chart-holder" }, svg, tip),
-    tableView(["", ...series.map((sr) => sr.name)], categories.map((cat, c) => [cat, ...series.map((sr) => fmt(sr.values[c]))])),
+  return revealWhenVisible(
+    h(
+      "figure",
+      { class: "chart" },
+      h("figcaption", {}, h("strong", {}, title), describe ? h("span", { class: "meta" }, ` — ${describe}`) : null),
+      legend(series),
+      h("div", { class: "chart-holder" }, svg, tip),
+      tableView(["", ...series.map((sr) => sr.name)], categories.map((cat, c) => [cat, ...series.map((sr) => fmt(sr.values[c]))])),
+    ),
   );
 }

@@ -507,3 +507,82 @@ tr.row-good td { background: var(--good-bg); }
 .graph-svg.focus-mode .edge.incident { stroke: var(--accent); stroke-width: 1.8; opacity: 1; }
 .graph-svg.focus-mode .node:not(.nbr) { opacity: 0.3; }
 .graph-svg.focus-mode .node.nbr text.minor { display: block; }
+
+/* --- motion: pages, charts and the graph build in ------------------------------------ */
+
+@keyframes rise { from { opacity: 0; transform: translateY(14px); } }
+@keyframes pop-in { from { opacity: 0; transform: translateY(10px) scale(0.96); } }
+@keyframes fade-in { from { opacity: 0; } }
+@keyframes bar-grow { from { transform: scaleY(0); } }
+@keyframes line-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+@keyframes node-pop { 0% { transform: scale(0); } 60% { transform: scale(1.4); } }
+@keyframes edge-flash { from { opacity: 0; stroke-width: 3.4px; } }
+
+.page-enter > * { animation: rise 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) backwards; }
+.page-enter .tiles > *, .page-enter .cards > * { animation: pop-in 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) backwards; }
+.page-enter tbody tr { animation: fade-in 0.4s ease-out backwards; }
+.page-enter > :nth-child(1) { animation-delay: 0ms; }
+.page-enter > :nth-child(2) { animation-delay: 70ms; }
+.page-enter > :nth-child(3) { animation-delay: 140ms; }
+.page-enter > :nth-child(4) { animation-delay: 210ms; }
+.page-enter > :nth-child(5) { animation-delay: 280ms; }
+.page-enter > :nth-child(6) { animation-delay: 350ms; }
+.page-enter > :nth-child(7) { animation-delay: 420ms; }
+.page-enter > :nth-child(8) { animation-delay: 490ms; }
+.page-enter .tiles > :nth-child(1), .page-enter .cards > :nth-child(1) { animation-delay: 120ms; }
+.page-enter .tiles > :nth-child(2), .page-enter .cards > :nth-child(2) { animation-delay: 190ms; }
+.page-enter .tiles > :nth-child(3), .page-enter .cards > :nth-child(3) { animation-delay: 260ms; }
+.page-enter .tiles > :nth-child(4), .page-enter .cards > :nth-child(4) { animation-delay: 330ms; }
+.page-enter .tiles > :nth-child(5), .page-enter .cards > :nth-child(5) { animation-delay: 400ms; }
+.page-enter .tiles > :nth-child(6), .page-enter .cards > :nth-child(6) { animation-delay: 470ms; }
+.page-enter .tiles > :nth-child(7), .page-enter .cards > :nth-child(7) { animation-delay: 540ms; }
+.page-enter .tiles > :nth-child(8), .page-enter .cards > :nth-child(8) { animation-delay: 610ms; }
+.page-enter tbody tr:nth-child(1) { animation-delay: 200ms; }
+.page-enter tbody tr:nth-child(2) { animation-delay: 235ms; }
+.page-enter tbody tr:nth-child(3) { animation-delay: 270ms; }
+.page-enter tbody tr:nth-child(4) { animation-delay: 305ms; }
+.page-enter tbody tr:nth-child(5) { animation-delay: 340ms; }
+.page-enter tbody tr:nth-child(6) { animation-delay: 375ms; }
+.page-enter tbody tr:nth-child(7) { animation-delay: 410ms; }
+.page-enter tbody tr:nth-child(8) { animation-delay: 445ms; }
+.page-enter tbody tr:nth-child(9) { animation-delay: 480ms; }
+.page-enter tbody tr:nth-child(10) { animation-delay: 515ms; }
+.page-enter tbody tr:nth-child(11) { animation-delay: 550ms; }
+.page-enter tbody tr:nth-child(12) { animation-delay: 585ms; }
+
+.nav-item { transition: background 0.18s ease, color 0.18s ease; }
+
+/* charts: hidden until scrolled into view, then drawn */
+.chart:not(.in) .bar, .chart:not(.in) .line, .chart:not(.in) .end-label { opacity: 0; }
+.chart-svg .bar { transform-box: fill-box; transform-origin: 50% 100%; }
+.chart.in .bar { animation: bar-grow 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) backwards; }
+.chart.in .bar.d0 { animation-delay: 0ms; }
+.chart.in .bar.d1 { animation-delay: 60ms; }
+.chart.in .bar.d2 { animation-delay: 120ms; }
+.chart.in .bar.d3 { animation-delay: 180ms; }
+.chart.in .bar.d4 { animation-delay: 240ms; }
+.chart.in .bar.d5 { animation-delay: 300ms; }
+.chart.in .bar.d6 { animation-delay: 360ms; }
+.chart.in .bar.d7 { animation-delay: 420ms; }
+.chart.in .bar.d8 { animation-delay: 480ms; }
+.chart.in .bar.d9 { animation-delay: 540ms; }
+.chart.in .bar.d10 { animation-delay: 600ms; }
+.chart.in .bar.d11 { animation-delay: 660ms; }
+.chart.in .bar.d12 { animation-delay: 720ms; }
+.chart.in .bar.d13 { animation-delay: 780ms; }
+.chart.in .bar.d14 { animation-delay: 840ms; }
+.chart.in .bar.d15 { animation-delay: 900ms; }
+.chart.in .line { stroke-dasharray: 1; animation: line-draw 1.2s ease-out backwards; }
+.chart.in .line.series-2 { animation-delay: 0.3s; }
+.chart.in .line.dashed { stroke-dasharray: 5 4; animation: fade-in 0.9s ease-out backwards; }
+.chart.in .end-label { animation: fade-in 0.5s ease-out 1s backwards; }
+
+/* supply-chain map: grown node by node */
+.graph-svg .node.pending, .graph-svg .edge.pending { display: none; }
+.graph-svg .node.enter circle { transform-box: fill-box; transform-origin: center; animation: node-pop 0.6s cubic-bezier(0.2, 1, 0.4, 1) backwards; }
+.graph-svg .node.enter text { animation: fade-in 0.4s ease-out 0.2s backwards; }
+.graph-svg .edge.enter { animation: edge-flash 0.9s ease-out backwards; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
