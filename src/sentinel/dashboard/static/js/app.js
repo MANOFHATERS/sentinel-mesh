@@ -199,6 +199,7 @@ function renderShell() {
         chainEl,
         h("span", { class: "tenant" }, `tenant ${session.tenant_id}`),
         h("span", {}, `${session.principal} · ${session.role}`),
+        session.can_act ? (live.button = h("button", { class: "btn live", type: "button", onclick: toggleLive }, liveLabel())) : null,
         h("button", { class: "btn ghost", type: "button", onclick: signOut }, "Sign out"),
       ),
     ),
@@ -207,6 +208,69 @@ function renderShell() {
       : h("div", { class: "readonly-banner", role: "note" }, `Read-only view: you are signed in as a ${session.role}. Launching, approving and rejecting are available to analysts only.`),
     h("div", { class: "layout" }, nav, mainEl),
   ]);
+}
+
+// --- live feed --------------------------------------------------------------- //
+// Streams held-out flows through the incident graph a few at a time, so alerts keep
+// arriving while someone talks, instead of one click ingesting a batch. It is the same
+// POST /api/feed/replay the Replay button uses (analyst-only on the server), driven by a
+// timer in the page; closing the tab stops it.
+
+const LIVE_BATCH = 4;
+const LIVE_EVERY_MS = 2000;
+const live = { on: false, timer: null, busy: false, total: 0, gated: 0, dismissed: 0, button: null };
+
+function liveLabel() {
+  if (!live.on && !live.total) return "▶ Start live feed";
+  const counts = `${live.total} in · ${live.dismissed} dismissed · ${live.gated} for approval`;
+  return live.on ? `● Live — ${counts} (stop)` : `▶ Resume live feed — ${counts}`;
+}
+
+function paintLive(message) {
+  if (!live.button) return;
+  replace(live.button, message || liveLabel());
+  live.button.classList.toggle("live-on", live.on);
+}
+
+function stopLive(message) {
+  if (live.timer) clearInterval(live.timer);
+  live.timer = null;
+  live.on = false;
+  paintLive(message);
+}
+
+async function liveTick() {
+  if (live.busy || !session || !session.can_act) return;
+  live.busy = true;
+  try {
+    const out = await api.post("/api/feed/replay", { count: LIVE_BATCH });
+    live.total += out.ingested;
+    live.gated += out.gated;
+    live.dismissed += out.dismissed;
+    paintLive();
+    refreshChrome();
+  } catch (error) {
+    stopLive(error.status === 409 ? "Feed exhausted — every held-out flow has been ingested" : "Live feed stopped");
+  } finally {
+    live.busy = false;
+  }
+}
+
+function toggleLive() {
+  if (live.on) {
+    stopLive();
+    return;
+  }
+  live.on = true;
+  paintLive();
+  liveTick();
+  live.timer = setInterval(liveTick, LIVE_EVERY_MS);
+}
+
+function resetLive() {
+  stopLive();
+  live.total = live.gated = live.dismissed = 0;
+  live.button = null;
 }
 
 let ssoRefreshToken = null;
@@ -243,6 +307,7 @@ function signOut(message) {
   // Best effort: tell the server to revoke the session; sign out locally regardless.
   if (ssoRefreshToken) api.post("/auth/logout").catch(() => {});
   stopSsoRefresh();
+  resetLive();
   api.signOut();
   session = null;
   // The next person to sign in starts at the Overview, not wherever the last one left off.
@@ -261,6 +326,7 @@ const SSO_ERRORS = {
 
 function renderLogin(message) {
   stopRefresh();
+  stopLive();
   clear(root);
   const input = h("input", {
     id: "token",
@@ -372,7 +438,12 @@ async function route() {
       // click turns an intended click into a missed one — or into a different one.
       const active = document.activeElement;
       if (active && mainEl.contains(active) && active !== mainEl) return;
-      if (pointerInMain || document.hidden) return;
+      // While the live feed runs, pages with no approve/reject controls keep refreshing
+      // under the pointer, or the numbers the feed exists to move would freeze whenever
+      // the mouse rests on them. The approval queue keeps the rule: rows shifting under a
+      // click there could approve the wrong thing.
+      const liveView = live.on && (name === "overview" || name === "incidents");
+      if ((pointerInMain && !liveView) || document.hidden) return;
       draw(view, arg, token, { quiet: true });
     }, 4000);
   }

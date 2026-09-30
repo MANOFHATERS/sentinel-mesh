@@ -476,3 +476,6 @@ tr.row-good td { background: var(--good-bg); }
 .token-box input { width: 100%; margin: 6px 0 10px; box-sizing: border-box; }
 .login ul { padding-left: 18px; }
 .login li { margin: 8px 0; }
+
+.btn.live { font-variant-numeric: tabular-nums; }
+.btn.live.live-on { background: var(--good-bg); color: var(--good); border-color: transparent; }

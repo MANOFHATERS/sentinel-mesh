@@ -39,3 +39,13 @@ def test_the_sso_button_is_not_an_anchor_the_href_filter_would_strip():
     source = (STATIC / "js" / "app.js").read_text(encoding="utf-8")
     assert 'href: "/auth/login"' not in source
     assert 'window.location.assign("/auth/login")' in source
+
+
+def test_the_live_feed_is_analyst_only_and_leaves_the_approval_queue_guarded():
+    source = (STATIC / "js" / "app.js").read_text(encoding="utf-8")
+    # only an analyst is given the control, and it drives the analyst-only replay route
+    assert "session.can_act ? (live.button" in source
+    assert '"/api/feed/replay", { count: LIVE_BATCH }' in source
+    # while live, only pages without approve/reject controls refresh under the pointer
+    assert 'name === "overview" || name === "incidents"' in source
+    assert '"queue"' not in source.split("const liveView")[1].split("\n")[0]
