@@ -212,6 +212,8 @@ function renderShell() {
 function signOut() {
   api.signOut();
   session = null;
+  // The next person to sign in starts at the Overview, not wherever the last one left off.
+  window.history.replaceState(null, "", window.location.pathname + window.location.search);
   renderLogin();
 }
 
