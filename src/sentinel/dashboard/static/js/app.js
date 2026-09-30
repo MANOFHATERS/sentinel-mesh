@@ -1073,8 +1073,9 @@ async function viewSupplyChain(arg) {
   const data = await api.get(`/api/supply-chain/graph?scope=${encodeURIComponent(scope)}`);
   const detail = h("aside", { class: "panel node-detail", "aria-live": "polite" }, empty("Select a node to see the paths behind its score."));
   const mapHolder = h("div", { class: "graph-holder" });
+  let map = null;
   async function select(nodeId) {
-    replace(mapHolder, renderGraph(data, { onSelect: select, selected: nodeId }));
+    if (map) map.setSelected(nodeId); // in place: keeps the layout and the zoom
     replace(detail, h("p", { class: "loading" }, "Explaining…"));
     try {
       const within = data.advisory ? `?advisory=${encodeURIComponent(data.advisory.advisory_id)}` : "";
@@ -1084,7 +1085,8 @@ async function viewSupplyChain(arg) {
       replace(detail, errorBox(error));
     }
   }
-  replace(mapHolder, renderGraph(data, { onSelect: select }));
+  map = renderGraph(data, { onSelect: select });
+  replace(mapHolder, map.element);
   const scopes = [["top", "Top risk (whole graph)"], ["all", "Entire graph"], ...data.advisories.map((a) => [`advisory:${a.advisory_id}`, `${a.advisory_id} — ${a.package_id}`])];
   const selectEl = h(
     "select",

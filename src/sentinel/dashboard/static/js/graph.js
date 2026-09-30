@@ -1,7 +1,17 @@
 // Renders the supply-chain map as SVG from the force layout.
+//
+// The map is built in front of the reader: the simulation is stepped a few ticks per
+// animation frame, so the nodes spread out from the centre and the drawing refits as it
+// grows, then settles on exactly the picture the synchronous layout would give. It can be
+// zoomed (buttons, mouse wheel, + / - keys) and panned (drag), and hovering or focusing a
+// node lights up its connections and dims the rest.
+//
+// Nothing here sets inline styles or markup: attributes and classes only, as the
+// Content-Security-Policy and dom.js require.
 
-import { s } from "./dom.js";
+import { h, s } from "./dom.js";
 import { createSimulation } from "./force.js";
+import { MAX_SCALE, MIN_SCALE, boxCentre, clampBox, fitBox, panBox, scaleOf, viewBoxString, zoomBox } from "./viewport.js";
 
 export function nodeRadius(node) {
   const risk = Number.isFinite(node.risk) ? node.risk : 0;
@@ -18,37 +28,40 @@ export function pathEdges(paths) {
   return keys;
 }
 
-export function renderGraph(data, { onSelect, selected } = {}) {
-  const width = 900;
-  const height = 620;
+const WIDTH = 900;
+const HEIGHT = 620;
+const MAX_TICKS = 300;
+const FRAME_BUDGET_MS = 12;
+const ZOOM_STEP = 1.4;
+const LABELS_ALL_AT = 2.2;
+
+function prefersReducedMotion() {
+  try {
+    return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  } catch {
+    return false;
+  }
+}
+
+// Returns {element, setSelected, rebuild, destroy}. ``element`` holds the controls and the SVG.
+export function renderGraph(data, { onSelect, selected, animate = true } = {}) {
   const many = data.nodes.length > 150;
   const sim = createSimulation(data.nodes, data.edges, {
-    width,
-    height,
+    width: WIDTH,
+    height: HEIGHT,
     linkDistance: many ? 22 : 46,
     charge: many ? -26 : -90,
     radius: nodeRadius,
-  }).run(300);
-  // Fit the drawing, but never zoom in past a minimum canvas: a seven-node advisory
-  // scope fitted edge to edge renders nodes the size of the viewport.
-  const fitted = sim.bounds(24);
-  const minWidth = 560;
-  const minHeight = 380;
-  const box = {
-    x: fitted.x - Math.max(0, minWidth - fitted.width) / 2,
-    y: fitted.y - Math.max(0, minHeight - fitted.height) / 2,
-    width: Math.max(fitted.width, minWidth),
-    height: Math.max(fitted.height, minHeight),
-  };
+  });
   const highlighted = pathEdges(data.highlight);
   const onPath = new Set((data.highlight || []).flat());
   const advisoryPackage = data.advisory ? data.advisory.package_id : null;
 
   const svg = s("svg", {
-    class: "graph-svg",
-    viewBox: `${box.x.toFixed(1)} ${box.y.toFixed(1)} ${box.width.toFixed(1)} ${box.height.toFixed(1)}`,
+    class: `graph-svg${many ? " many" : ""}`,
     role: "img",
-    "aria-label": `Supply-chain graph: ${data.nodes.length} nodes, ${data.edges.length} edges`,
+    tabindex: "0",
+    "aria-label": `Supply-chain graph: ${data.nodes.length} nodes, ${data.edges.length} edges. Use plus and minus to zoom, drag to pan.`,
   });
   const defs = s("defs", {});
   for (const [id, cls] of [["arrow", "arrow"], ["arrow-hot", "arrow hot"]]) {
@@ -62,45 +75,52 @@ export function renderGraph(data, { onSelect, selected } = {}) {
   }
   svg.appendChild(defs);
 
+  // --- elements, created once and repositioned as the layout runs ---------------- //
   const edgeLayer = s("g", { class: "edges" });
   const hotLayer = s("g", { class: "edges hot" });
-  for (const link of sim.links) {
+  const adjacency = new Map(sim.nodes.map((n) => [n.id, { edges: [], neighbours: new Set() }]));
+  const edgeEls = sim.links.map((link, index) => {
     const key = `${link.source.id}->${link.target.id}`;
     const hot = highlighted.has(key);
-    // Shorten the line so the arrowhead sits on the target's rim.
-    const dx = link.target.x - link.source.x;
-    const dy = link.target.y - link.source.y;
-    const len = Math.sqrt(dx * dx + dy * dy) || 1;
-    const rt = nodeRadius(link.target) + 2;
     const line = s("line", {
-      x1: link.source.x.toFixed(2),
-      y1: link.source.y.toFixed(2),
-      x2: (link.target.x - (dx / len) * rt).toFixed(2),
-      y2: (link.target.y - (dy / len) * rt).toFixed(2),
       class: `edge ${link.kind}${hot ? " hot" : ""}`,
       "marker-end": hot ? "url(#arrow-hot)" : many ? null : "url(#arrow)",
     });
     (hot ? hotLayer : edgeLayer).appendChild(line);
-  }
+    adjacency.get(link.source.id).edges.push(index);
+    adjacency.get(link.target.id).edges.push(index);
+    adjacency.get(link.source.id).neighbours.add(link.target.id);
+    adjacency.get(link.target.id).neighbours.add(link.source.id);
+    return line;
+  });
   svg.appendChild(edgeLayer);
   svg.appendChild(hotLayer);
 
   const nodeLayer = s("g", { class: "nodes" });
-  for (const node of sim.nodes) {
+  let hoverId = null;
+  let selectedId = selected || null;
+  let dragMoved = false;
+
+  const nodeEls = sim.nodes.map((node) => {
     const classes = ["node", node.kind];
     if (node.intrinsic) classes.push("intrinsic");
     if (onPath.has(node.id)) classes.push("on-path");
     if (node.id === advisoryPackage) classes.push("advisory");
-    if (node.id === selected) classes.push("selected");
     const group = s(
       "g",
       {
         class: classes.join(" "),
-        transform: `translate(${node.x.toFixed(2)},${node.y.toFixed(2)})`,
         tabindex: "0",
         role: "button",
         "aria-label": `${node.id}, ${node.kind}, risk ${Number(node.risk).toFixed(3)}`,
-        onclick: () => onSelect && onSelect(node.id),
+        onclick: () => {
+          if (dragMoved) return; // the end of a pan, not a click
+          if (onSelect) onSelect(node.id);
+        },
+        onpointerenter: () => focusOn(node.id, true),
+        onpointerleave: () => focusOn(null, true),
+        onfocus: () => focusOn(node.id, true),
+        onblur: () => focusOn(null, true),
         onkeydown: (event) => {
           if ((event.key === "Enter" || event.key === " ") && onSelect) {
             event.preventDefault();
@@ -111,11 +131,219 @@ export function renderGraph(data, { onSelect, selected } = {}) {
       s("title", {}, `${node.id} (${node.kind}) risk ${Number(node.risk).toFixed(3)}${node.intrinsic ? " · risk source" : ""}`),
       s("circle", { r: nodeRadius(node).toFixed(2) }),
     );
-    if (!many || onPath.has(node.id) || node.kind === "organization") {
-      group.appendChild(s("text", { x: (nodeRadius(node) + 3).toFixed(1), y: "3.5" }, node.id));
-    }
+    const always = !many || onPath.has(node.id) || node.kind === "organization";
+    group.appendChild(s("text", { class: always ? "" : "minor", x: (nodeRadius(node) + 3).toFixed(1), y: "3.5" }, node.id));
     nodeLayer.appendChild(group);
-  }
+    return group;
+  });
   svg.appendChild(nodeLayer);
-  return svg;
+
+  // --- connections light up ------------------------------------------------------ //
+  function focusOn(id, isHover) {
+    if (isHover) hoverId = id;
+    const target = hoverId || selectedId;
+    svg.classList.toggle("focus-mode", Boolean(target));
+    const around = target ? adjacency.get(target) : null;
+    const incident = new Set(around ? around.edges : []);
+    edgeEls.forEach((line, i) => line.classList.toggle("incident", incident.has(i)));
+    sim.nodes.forEach((node, i) => {
+      nodeEls[i].classList.toggle("nbr", Boolean(around) && (around.neighbours.has(node.id) || node.id === target));
+      nodeEls[i].classList.toggle("selected", node.id === selectedId);
+    });
+  }
+
+  // --- drawing the current layout -------------------------------------------------- //
+  function paint() {
+    sim.links.forEach((link, i) => {
+      const dx = link.target.x - link.source.x;
+      const dy = link.target.y - link.source.y;
+      const len = Math.sqrt(dx * dx + dy * dy) || 1;
+      const rt = nodeRadius(link.target) + 2; // the arrowhead sits on the target's rim
+      const line = edgeEls[i];
+      line.setAttribute("x1", link.source.x.toFixed(2));
+      line.setAttribute("y1", link.source.y.toFixed(2));
+      line.setAttribute("x2", (link.target.x - (dx / len) * rt).toFixed(2));
+      line.setAttribute("y2", (link.target.y - (dy / len) * rt).toFixed(2));
+    });
+    sim.nodes.forEach((node, i) => nodeEls[i].setAttribute("transform", `translate(${node.x.toFixed(2)},${node.y.toFixed(2)})`));
+  }
+
+  // --- view: zoom and pan --------------------------------------------------------- //
+  let base = fitBox(sim.bounds(24));
+  let box = base;
+  let autoFit = true;
+
+  function applyView() {
+    svg.setAttribute("viewBox", viewBoxString(box));
+    const scale = scaleOf(box, base);
+    svg.classList.toggle("zoomed", scale >= LABELS_ALL_AT);
+    readout.textContent = `${Math.round(scale * 100)}%`;
+    zoomInBtn.disabled = scale >= MAX_SCALE - 1e-6;
+    zoomOutBtn.disabled = scale <= MIN_SCALE + 1e-6;
+  }
+
+  function toGraph(clientX, clientY) {
+    const matrix = svg.getScreenCTM && svg.getScreenCTM();
+    if (!matrix) return boxCentre(box);
+    const point = svg.createSVGPoint();
+    point.x = clientX;
+    point.y = clientY;
+    const p = point.matrixTransform(matrix.inverse());
+    return { x: p.x, y: p.y };
+  }
+
+  function zoom(factor, about) {
+    autoFit = false;
+    const at = about || boxCentre(box);
+    box = clampBox(zoomBox(box, factor, at.x, at.y), base);
+    applyView();
+  }
+
+  function fit() {
+    autoFit = false;
+    base = fitBox(sim.bounds(24));
+    box = base;
+    applyView();
+  }
+
+  svg.addEventListener(
+    "wheel",
+    (event) => {
+      event.preventDefault();
+      zoom(Math.exp(-event.deltaY * 0.0016), toGraph(event.clientX, event.clientY));
+    },
+    { passive: false },
+  );
+
+  svg.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    autoFit = false;
+    dragMoved = false;
+    let last = { x: event.clientX, y: event.clientY };
+    const start = { ...last };
+    const move = (e) => {
+      if (!dragMoved && Math.hypot(e.clientX - start.x, e.clientY - start.y) < 4) return;
+      dragMoved = true;
+      svg.classList.add("panning");
+      const matrix = svg.getScreenCTM();
+      const scale = matrix ? matrix.a : 1; // screen pixels per graph unit
+      box = panBox(box, (e.clientX - last.x) / scale, (e.clientY - last.y) / scale);
+      last = { x: e.clientX, y: e.clientY };
+      applyView();
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      svg.classList.remove("panning");
+      // dragMoved stays true through the click that follows a drag, then clears.
+      setTimeout(() => (dragMoved = false), 0);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  });
+
+  svg.addEventListener("keydown", (event) => {
+    if (event.target !== svg) return;
+    if (event.key === "+" || event.key === "=") zoom(ZOOM_STEP);
+    else if (event.key === "-" || event.key === "_") zoom(1 / ZOOM_STEP);
+    else if (event.key === "0") fit();
+    else return;
+    event.preventDefault();
+  });
+
+  // --- controls ------------------------------------------------------------------- //
+  const zoomInBtn = h("button", { class: "map-btn", type: "button", "aria-label": "Zoom in", title: "Zoom in", onclick: () => zoom(ZOOM_STEP) }, "+");
+  const zoomOutBtn = h("button", { class: "map-btn", type: "button", "aria-label": "Zoom out", title: "Zoom out", onclick: () => zoom(1 / ZOOM_STEP) }, "−");
+  const fitBtn = h("button", { class: "map-btn wide", type: "button", "aria-label": "Fit the whole graph", title: "Fit to view", onclick: fit }, "Fit");
+  const rebuildBtn = h("button", { class: "map-btn wide", type: "button", "aria-label": "Rebuild the layout", title: "Rebuild the layout", onclick: () => rebuild() }, "↻ Rebuild");
+  const readout = h("span", { class: "map-readout", "aria-live": "off" }, "100%");
+  const status = h("span", { class: "map-status", role: "status" }, "");
+  const controls = h("div", { class: "map-controls" }, zoomInBtn, zoomOutBtn, fitBtn, rebuildBtn, readout);
+  const element = h("div", { class: "graph-map" }, controls, status, svg);
+
+  // --- the build animation ---------------------------------------------------------- //
+  let frame = 0;
+  let orphanFrames = 0;
+  let building = false;
+
+  function finishBuild() {
+    building = false;
+    edgeLayer.setAttribute("opacity", "1");
+    hotLayer.setAttribute("opacity", "1");
+    status.textContent = "";
+    base = fitBox(sim.bounds(24));
+    if (autoFit) box = base;
+    paint();
+    applyView();
+  }
+
+  function step() {
+    if (!building) return;
+    if (!svg.isConnected) {
+      // Not attached yet (the page inserts the view a moment after building it), or
+      // replaced by another view. Wait a little, then stop working for nothing.
+      orphanFrames += 1;
+      if (orphanFrames > 30) building = false;
+      else frame = requestAnimationFrame(step);
+      return;
+    }
+    orphanFrames = 0;
+    const started = performance.now();
+    let ticks = 0;
+    while (!sim.settled(MAX_TICKS) && ticks < 12 && (ticks === 0 || performance.now() - started < FRAME_BUDGET_MS)) {
+      sim.tick();
+      ticks += 1;
+    }
+    const progress = Math.min(1, sim.ticks / 120); // edges fade in over the first 120 ticks
+    edgeLayer.setAttribute("opacity", progress.toFixed(2));
+    hotLayer.setAttribute("opacity", "1");
+    status.textContent = `Building the layout… ${Math.min(99, Math.round((sim.ticks / MAX_TICKS) * 100))}%`;
+    if (autoFit) {
+      base = fitBox(sim.bounds(24));
+      box = base;
+    }
+    paint();
+    applyView();
+    if (sim.settled(MAX_TICKS)) finishBuild();
+    else frame = requestAnimationFrame(step);
+  }
+
+  function rebuild() {
+    cancelAnimationFrame(frame);
+    sim.reset(); // the deterministic starting arrangement: same picture at the end
+    autoFit = true;
+    startBuild();
+  }
+
+  function startBuild() {
+    if (!animate || prefersReducedMotion()) {
+      sim.run(MAX_TICKS);
+      finishBuild();
+      return;
+    }
+    building = true;
+    paint();
+    applyView();
+    frame = requestAnimationFrame(step);
+  }
+
+  paint();
+  applyView();
+  focusOn(null, false);
+  startBuild();
+
+  return {
+    element,
+    setSelected(id) {
+      selectedId = id;
+      focusOn(null, false);
+    },
+    rebuild,
+    destroy() {
+      building = false;
+      cancelAnimationFrame(frame);
+    },
+  };
 }

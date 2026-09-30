@@ -191,13 +191,36 @@ export function createSimulation(inputNodes, inputLinks, options = {}) {
     return { x: x0 - pad, y: y0 - pad, width: x1 - x0 + 2 * pad, height: y1 - y0 + 2 * pad };
   }
 
+  // Back to the deterministic starting arrangement, so a rebuild ends on the same picture.
+  function reset() {
+    nodes.forEach((node, index) => {
+      const r = INITIAL_RADIUS * Math.sqrt(0.5 + index);
+      const angle = index * INITIAL_ANGLE;
+      node.x = cx + r * Math.cos(angle);
+      node.y = cy + r * Math.sin(angle);
+      node.vx = 0;
+      node.vy = 0;
+    });
+    alpha = 1;
+    ticks = 0;
+    seed = 0x9e3779b9;
+    return api;
+  }
+
   const api = {
     nodes,
     links,
     tick,
     run,
+    reset,
     bounds,
     kineticEnergy,
+    // True once run(maxTicks) would stop: cooled below alphaMin, or out of ticks. Lets a
+    // caller animate the layout by calling tick() a few times per frame until it settles,
+    // and land on exactly the picture run() produces.
+    settled(maxTicks = 300) {
+      return alpha < alphaMin || ticks >= maxTicks;
+    },
     get alpha() {
       return alpha;
     },
