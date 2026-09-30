@@ -50,7 +50,13 @@ from sentinel.dashboard.registry import WorkspaceUnavailable
 from sentinel.dashboard.runs import Busy, RunManager, RunsUnavailable
 from sentinel.dashboard.scenarios import ASSET_INVENTORY, ScenarioName
 from sentinel.dashboard.sso import SsoService, install_sso
-from sentinel.dashboard.workspace import Conflict, NotFound, Workspace, WorkspaceError
+from sentinel.dashboard.workspace import (
+    Conflict,
+    NotFound,
+    Workspace,
+    WorkspaceError,
+    workspace_features,
+)
 from sentinel.real.repos import RepoError, parse_github_url
 from sentinel.real.service import RealData
 
@@ -117,9 +123,7 @@ def create_app(
     ready = workspaces.ready_items() if hasattr(workspaces, "ready_items") else workspaces.items()
     for tenant, workspace in ready:
         if workspace.tenant_id != tenant:
-            raise AuthError(
-                f"workspace for {tenant!r} serves tenant {workspace.tenant_id!r}"
-            )
+            raise AuthError(f"workspace for {tenant!r} serves tenant {workspace.tenant_id!r}")
     evaluation = evaluation_path or Path("data/artifacts/evaluation.json")
 
     app = FastAPI(
@@ -195,18 +199,21 @@ def create_app(
             raise Forbidden(f"{who.principal} is a {who.role.value}; viewers cannot act")
         return who
 
-    def synthetic_workspace(ws: Annotated[Workspace, Depends(workspace)]) -> Workspace:
-        # The scripted scenarios, the synthetic supply-chain graph and the fixture repository have
-        # no real counterpart yet (PRD Phase 2: SBOM ingestion), so a real workspace refuses them
-        # rather than serve synthetic content under a real-data label.
-        if ws.models.mode == "real":
-            raise NotFound("not available in the real-data workspace: no real data behind it")
-        return ws
+    def requires(feature: str):
+        def dependency(ws: Annotated[Workspace, Depends(workspace)]) -> Workspace:
+            # A real workspace serves a page only if real data backs it; otherwise it refuses
+            # rather than serve synthetic content under a real-data label.
+            if not workspace_features(ws.models)[feature]:
+                raise NotFound("not available in the real-data workspace: no real data behind it")
+            return ws
+
+        return dependency
 
     Who = Annotated[Identity, Depends(identity)]
     Actor = Annotated[Identity, Depends(actor)]
     Ws = Annotated[Workspace, Depends(workspace)]
-    SynWs = Annotated[Workspace, Depends(synthetic_workspace)]
+    SupplyWs = Annotated[Workspace, Depends(requires("supply_chain"))]
+    CodeWs = Annotated[Workspace, Depends(requires("code_scan"))]
 
     # --- routes ----------------------------------------------------------------- #
 
@@ -214,28 +221,51 @@ def create_app(
     def health() -> dict[str, Any]:
         return {"ok": True}
 
+    ALL_FEATURES = {
+        "scenarios": True,
+        "supply_chain": True,
+        "code_scan": True,
+        "models": True,
+        "kb": False,
+    }
+
     def describe_tenant(tenant: str) -> dict[str, Any]:
         if hasattr(workspaces, "describe"):
             return workspaces.describe(tenant)
         models = getattr(workspaces.get(tenant), "models", None)
-        return {"mode": getattr(models, "mode", "synthetic"), "dataset": None,
-                "state": "ready", "error": None}
+        return {
+            "mode": getattr(models, "mode", "synthetic"),
+            "dataset": None,
+            "state": "ready",
+            "error": None,
+            "features": ALL_FEATURES,
+        }
 
     @app.get("/api/session")
     def session(who: Who) -> dict[str, Any]:
         info = describe_tenant(who.tenant_id)
-        return {"principal": who.principal, "tenant_id": who.tenant_id,
-                "role": who.role.value, "can_act": who.can_act,
-                "data_mode": info["mode"], "dataset": info["dataset"],
-                "workspace": info["state"], "workspace_error": info["error"]}
+        return {
+            "principal": who.principal,
+            "tenant_id": who.tenant_id,
+            "role": who.role.value,
+            "can_act": who.can_act,
+            "data_mode": info["mode"],
+            "dataset": info["dataset"],
+            "workspace": info["state"],
+            "workspace_error": info["error"],
+            "features": info["features"],
+        }
 
     @app.get("/api/auth/audit")
     def auth_audit(who: Who) -> dict[str, Any]:
         """Who signed in, was refused, refreshed or was deprovisioned — this tenant's rows."""
         if sso is None:
             return {"enabled": False, "intact": True, "items": []}
-        return {"enabled": True, "intact": sso.audit.verify(),
-                "items": sso.audit.events(tenant=who.tenant_id)}
+        return {
+            "enabled": True,
+            "intact": sso.audit.verify(),
+            "items": sso.audit.events(tenant=who.tenant_id),
+        }
 
     @app.get("/api/overview")
     def overview(ws: Ws) -> dict[str, Any]:
@@ -244,17 +274,19 @@ def create_app(
     @app.get("/api/assets")
     def assets(_who: Who) -> list[dict[str, Any]]:
         return [
-            {"address": a.address, "hostname": a.hostname, "role": a.role,
-             "protected": a.protected}
+            {"address": a.address, "hostname": a.hostname, "role": a.role, "protected": a.protected}
             for a in ASSET_INVENTORY.values()
         ]
 
     @app.get("/api/scenarios")
-    def scenarios(ws: SynWs) -> list[dict[str, Any]]:
+    def scenarios(ws: Ws) -> list[dict[str, Any]]:
         return views.scenarios_view(ws)
 
     @app.post("/api/scenarios/{name}/launch")
-    def launch(name: str, ws: SynWs, who: Actor) -> dict[str, Any]:
+    def launch(name: str, ws: Ws, who: Actor) -> dict[str, Any]:
+        if ws.models.mode == "real":
+            opened = ws.launch_real(name, launched_by=who.principal)
+            return {"scenario": name, "incidents": list(opened)}
         try:
             scenario = ScenarioName(name)
         except ValueError as exc:
@@ -305,7 +337,7 @@ def create_app(
 
     @app.get("/api/supply-chain/graph")
     def supply_graph(
-        ws: SynWs,
+        ws: SupplyWs,
         scope: Annotated[str, Query(max_length=96)] = "top",
         k: Annotated[int, Query(ge=1, le=50)] = 10,
     ) -> dict[str, Any]:
@@ -316,14 +348,14 @@ def create_app(
     @app.get("/api/supply-chain/nodes/{node_id}")
     def supply_node(
         node_id: str,
-        ws: SynWs,
+        ws: SupplyWs,
         advisory: Annotated[str | None, Query(max_length=64)] = None,
     ) -> dict[str, Any]:
         explanation = ws.explain(node_id, advisory_id=advisory)
         return {**views.node_view(explanation, ws.graph), "advisory_id": advisory}
 
     @app.get("/api/code-scan")
-    def code_scan(ws: SynWs) -> dict[str, Any]:
+    def code_scan(ws: CodeWs) -> dict[str, Any]:
         view = views.code_scan_view(ws)
         return {"available": view is not None, "scan": view}
 
@@ -404,7 +436,7 @@ def create_app(
         return real.kb_search(q, k=k)
 
     @app.get("/api/models")
-    def models_report(ws: SynWs) -> dict[str, Any]:
+    def models_report(ws: Ws) -> dict[str, Any]:
         # Tenant-agnostic training records, but still behind the token: the page
         # says what this deployment trained, which is not public information.
         return model_report(ws.models, policy=ws.models.policy)
@@ -414,6 +446,7 @@ def create_app(
     if sso is not None:
         install_sso(app, sso, static_tokens=len(tokens) > 0)
     else:
+
         @app.get("/auth/config")
         def auth_config() -> dict[str, Any]:
             return {"sso": False, "token_login": True, "mfa_required": False}

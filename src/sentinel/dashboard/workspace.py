@@ -210,6 +210,12 @@ class MeshModels:
     mode: str = "synthetic"
     #: The real-data evaluation report that :meth:`build_real` produced, when ``mode == "real"``.
     real_report: dict[str, Any] | None = None
+    #: The repository the code-scan graph reviews and opens draft pull requests against.
+    repository: str = "acme/billing"
+    #: The real supply chain's facts (issues per package, provenance), when one was loaded.
+    real_supply: dict[str, Any] | None = None
+    #: Real OSV advisories the real workspace can review, by advisory id.
+    real_advisories: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def build(cls, *, seed: int = DEFAULT_SEED, n_alerts: int = DEFAULT_ALERTS) -> MeshModels:
@@ -282,6 +288,8 @@ class MeshModels:
         attack_path: str | Path,
         seed: int = DEFAULT_SEED,
         limit: int = 20_000,
+        supply_chain_path: str | Path | None = None,
+        repo_cache_dir: str | Path | None = None,
     ) -> MeshModels:
         """The real-data variant: real triage model, real ATT&CK, real held-out flows.
 
@@ -303,6 +311,19 @@ class MeshModels:
         # interleaves them the way a mixed feed arrives, reproducibly.
         feed = list(test)
         random.Random(seed).shuffle(feed)
+        extra: dict[str, Any] = {}
+        if supply_chain_path is not None and Path(supply_chain_path).is_file():
+            extra.update(cls._real_supply_chain(Path(supply_chain_path), seed=seed))
+        if repo_cache_dir is not None and extra.get("real_supply"):
+            from sentinel.real.repos import load_repo_snapshot
+
+            primary = extra["real_supply"]["primary"]
+            if primary:
+                try:
+                    extra["snapshot"] = load_repo_snapshot(primary, repo_cache_dir)
+                    extra["repository"] = primary
+                except Exception:  # offline and not cached: the workspace simply has no code scan
+                    pass
         return replace(
             base,
             seed=seed,
@@ -312,7 +333,44 @@ class MeshModels:
             feed=tuple(feed),
             mode="real",
             real_report=report,
+            **extra,
         )
+
+    @staticmethod
+    def _real_supply_chain(path: Path, *, seed: int) -> dict[str, Any]:
+        """The real graph, its rule-defined ground truth, and a GNN trained on it."""
+        from sentinel.graph.synthetic import label_ground_truth
+        from sentinel.real.supplychain import graph_from_snapshot, load_snapshot, real_advisories
+
+        graph, facts = graph_from_snapshot(load_snapshot(path))
+        truth = label_ground_truth(graph)
+        node_ids = graph.node_ids()
+        labels = truth.labels(node_ids)
+        split = GraphSplit.stratified(labels, seed=seed)
+        gnn = SupplyChainGNN(random_state=seed).fit(
+            graph, labels, split, exposure=truth.risk_vector(node_ids)
+        )
+        advisories = real_advisories(graph, facts)
+        facts = {
+            **facts,
+            "truth": {
+                "intrinsic": len(truth.intrinsic),
+                "inherited": len(truth.inherited),
+                "nodes": graph.n_nodes,
+                "edges": len(graph.edges),
+            },
+        }
+        return {
+            "graph": graph,
+            "gnn": gnn,
+            "base_scores": gnn.risk_scores(graph),
+            "graph_evaluation": graph_evaluation(graph, truth, gnn, split),
+            "real_supply": facts,
+            "real_advisories": advisories,
+            "cve_package": next(iter(advisories.values())).package_id
+            if advisories
+            else graph.node_ids()[0],
+        }
 
     def start_background(self) -> MeshModels:
         """Start the slow studies (diffusion) that the Models page reports on."""
@@ -356,11 +414,42 @@ CREATE TABLE IF NOT EXISTS meta (
 """
 
 
+def workspace_features(models: MeshModels) -> dict[str, bool]:
+    """Which pages have data behind them for this workspace.
+
+    A synthetic workspace has everything. A real one has a page only if real data backs it: the
+    supply-chain map needs a real supply-chain snapshot, the code scan needs a real repository.
+    The API refuses a page that fails this test, and the sidebar does not offer it.
+    """
+    real = models.mode == "real"
+    return {
+        "scenarios": True,
+        "supply_chain": not real or models.real_supply is not None,
+        "code_scan": not real or models.repository != "acme/billing",
+        "models": True,
+        "kb": real,
+    }
+
+
+def _tag_value(tag: ScenarioName | str | None) -> str | None:
+    """A scenario tag as stored: a scripted scenario's value, or a real scenario's id."""
+    return None if tag is None else (tag.value if isinstance(tag, ScenarioName) else str(tag))
+
+
+def _parse_tag(text: str | None) -> ScenarioName | str | None:
+    if text is None:
+        return None
+    try:
+        return ScenarioName(text)
+    except ValueError:
+        return text
+
+
 @dataclass(frozen=True, slots=True)
 class ThreadRef:
     thread_id: str
     kind: str
-    scenario: ScenarioName | None
+    scenario: ScenarioName | str | None
     caption: str
     advisory_id: str | None
     position: int
@@ -368,7 +457,7 @@ class ThreadRef:
 
 @dataclass(frozen=True, slots=True)
 class ScenarioRun:
-    name: ScenarioName
+    name: ScenarioName | str
     launched_at: datetime
     launched_by: str
 
@@ -428,12 +517,13 @@ class Workspace:
             journal=SqliteJournal(self.workdir / "journal.sqlite"),
             registry=registry,
         )
-        hosts = [
-            asset.address for asset in ASSET_INVENTORY.values() if asset.hostname[0] != "("
-        ]
+        hosts = [asset.address for asset in ASSET_INVENTORY.values() if asset.hostname[0] != "("]
         hosts += [alert.asset_id for alert in models.feed]
+        owner, _, repo = models.repository.partition("/")
         self.sandbox = Sandbox(
             repo_files={item.path: item.text for item in models.snapshot.files},
+            owner=owner,
+            repo=repo,
             hosts=hosts,
             clock=self.clock,
         ).start()
@@ -458,9 +548,7 @@ class Workspace:
         self.incident_graph = build_incident_graph(
             triage=TriageAgent(model=models.triage_model, clock=self.clock),
             investigation=InvestigationAgent(kb=models.kb, clock=self.clock),
-            containment=ContainmentAgent(
-                clock=self.clock, policy=models.policy, triage_floor=True
-            ),
+            containment=ContainmentAgent(clock=self.clock, policy=models.policy, triage_floor=True),
             connector=self._connector,
             checkpointer=self._stores.checkpoints,
         )
@@ -477,7 +565,7 @@ class Workspace:
         self.shares: np.ndarray = neighbourhood_shares(models.gnn, models.graph)
         self._advisories: dict[str, _PublishedAdvisory] = {}
         self._threads: dict[str, ThreadRef] = {}
-        self._scenarios: dict[ScenarioName, ScenarioRun] = {}
+        self._scenarios: dict[ScenarioName | str, ScenarioRun] = {}
         self._code_scan: CodeScanAssessment | None = None
         self._restore()
 
@@ -518,7 +606,9 @@ class Workspace:
         for advisory_id, kind, published_at in db.execute(
             "SELECT advisory_id, kind, published_at FROM advisories ORDER BY position"
         ):
-            advisory = self.models.advisory(AdvisoryKind(kind))
+            advisory = self.models.real_advisories.get(advisory_id) or self.models.advisory(
+                AdvisoryKind(kind)
+            )
             if advisory.advisory_id != advisory_id:
                 raise WorkspaceError(
                     f"registry names advisory {advisory_id} but the models derive "
@@ -531,7 +621,7 @@ class Workspace:
             ref = ThreadRef(
                 thread_id=row[0],
                 kind=row[1],
-                scenario=None if row[2] is None else ScenarioName(row[2]),
+                scenario=_parse_tag(row[2]),
                 caption=row[3],
                 advisory_id=row[4],
                 position=row[5],
@@ -542,7 +632,7 @@ class Workspace:
         for name, launched_at, launched_by in db.execute(
             "SELECT name, launched_at, launched_by FROM scenarios"
         ):
-            scenario = ScenarioName(name)
+            scenario = _parse_tag(name)
             self._scenarios[scenario] = ScenarioRun(
                 scenario, datetime.fromisoformat(launched_at), launched_by
             )
@@ -554,7 +644,7 @@ class Workspace:
             (
                 ref.thread_id,
                 ref.kind,
-                None if ref.scenario is None else ref.scenario.value,
+                _tag_value(ref.scenario),
                 ref.caption,
                 ref.advisory_id,
                 ref.position,
@@ -641,7 +731,7 @@ class Workspace:
         *,
         kind: str,
         caption: str,
-        scenario: ScenarioName | None,
+        scenario: ScenarioName | str | None,
         advisory_id: str | None = None,
     ) -> RunResult:
         if state.incident_id in self._threads:
@@ -680,8 +770,9 @@ class Workspace:
             opened: list[str] = []
 
             if spec.advisory is not None:
-                opened.append(self._publish_and_review(self.models.advisory(spec.advisory),
-                                                       scenario=name))
+                opened.append(
+                    self._publish_and_review(self.models.advisory(spec.advisory), scenario=name)
+                )
             for index, flow in enumerate(spec.flows):
                 alert = script_alert(
                     self.models.story_flows[(name, index)],
@@ -703,16 +794,73 @@ class Workspace:
                 opened.append(self._scan_repository(scenario=name))
             return tuple(opened)
 
-    def _publish_and_review(self, advisory: Advisory, *, scenario: ScenarioName | None) -> str:
+    def real_scenario(self, scenario_id: str):
+        from sentinel.real.scenarios import real_scenarios
+
+        for spec in real_scenarios(self.models):
+            if spec.id == scenario_id:
+                return spec
+        raise NotFound(f"no real scenario {scenario_id!r}")
+
+    def launch_real(self, scenario_id: str, *, launched_by: str) -> tuple[str, ...]:
+        """Launch one real case (see :mod:`sentinel.real.scenarios`). Returns the thread ids."""
+        from sentinel.real.scenarios import CAMPAIGN_FLOWS
+
+        if self.models.mode != "real":
+            raise WorkspaceError("this workspace has no real scenarios")
+        spec = self.real_scenario(scenario_id)
+        with self._locked():
+            now = self.clock.now()
+            opened: list[str] = []
+            if spec.kind == "campaign":
+                pool = [a for a in self.models.feed if a.ground_truth_label == spec.subject]
+                key = f"campaign:{spec.subject}"
+                cursor = int(self._meta(key, "0"))
+                batch = pool[cursor : cursor + CAMPAIGN_FLOWS]
+                if not batch:
+                    raise Conflict(f"every held-out {spec.subject} flow has been replayed")
+                for offset, source in enumerate(batch):
+                    number = cursor + offset + 1
+                    alert = source.updated(
+                        tenant_id=self.tenant_id,
+                        alert_id=deterministic_id(
+                            "real-campaign", self.tenant_id, spec.subject, number
+                        ),
+                        ingested_at=max(now, source.timestamp),
+                    )
+                    result = self._start(
+                        self.incident_graph,
+                        new_incident(alert, at=now),
+                        kind=GraphKind.INCIDENT,
+                        caption=f"{spec.title} #{number}",
+                        scenario=spec.id,
+                    )
+                    opened.append(result.state.incident_id)
+                self._set_meta(key, str(cursor + len(batch)))
+            elif spec.kind == "advisory":
+                advisory = self.models.real_advisories[spec.subject]
+                opened.append(self._publish_and_review(advisory, scenario=spec.id))
+            else:
+                if self._code_scan is not None:
+                    raise Conflict(f"{self.models.repository} has already been scanned")
+                opened.append(self._scan_repository(scenario=spec.id))
+            self._stores.registry.execute(
+                "INSERT OR REPLACE INTO scenarios(name, launched_at, launched_by) VALUES (?, ?, ?)",
+                (spec.id, now.isoformat(), launched_by),
+            )
+            self._scenarios[spec.id] = ScenarioRun(spec.id, now, launched_by)
+            return tuple(opened)
+
+    def _publish_and_review(
+        self, advisory: Advisory, *, scenario: ScenarioName | str | None
+    ) -> str:
         if advisory.advisory_id in self._advisories:
             raise Conflict(f"advisory {advisory.advisory_id} is already published")
         now = self.clock.now()
         published = self._apply_advisory(advisory, now)
         self._stores.registry.execute(
-            "INSERT INTO advisories(advisory_id, kind, published_at, position) "
-            "VALUES (?, ?, ?, ?)",
-            (advisory.advisory_id, advisory.kind.value, now.isoformat(),
-             len(self._advisories) - 1),
+            "INSERT INTO advisories(advisory_id, kind, published_at, position) VALUES (?, ?, ?, ?)",
+            (advisory.advisory_id, advisory.kind.value, now.isoformat(), len(self._advisories) - 1),
         )
         alert = synthesize_vendor_alert(
             tenant_id=self.tenant_id,
@@ -758,12 +906,12 @@ class Workspace:
     def _assess_code(self, alert: Alert) -> CodeScanAssessment:
         return self.code_agent.assess(self.models.snapshot, alert=alert, now=alert.ingested_at)
 
-    def _scan_repository(self, *, scenario: ScenarioName | None) -> str:
+    def _scan_repository(self, *, scenario: ScenarioName | str | None) -> str:
         now = self.clock.now()
         alert = synthesize_scan_alert(
             self.models.snapshot,
             tenant_id=self.tenant_id,
-            repository=REPOSITORY,
+            repository=self.models.repository,
             at=now,
             commit="HEAD",
         )
@@ -772,7 +920,7 @@ class Workspace:
             self.code_graph,
             new_code_scan_incident(alert, at=now),
             kind=GraphKind.CODE_SCAN,
-            caption=f"Code scan of {REPOSITORY}",
+            caption=f"Code scan of {self.models.repository}",
             scenario=scenario,
         )
         return result.state.incident_id
@@ -874,13 +1022,15 @@ class Workspace:
                     f"incident {thread_id} is {state.status.value}; only a stalled "
                     "running incident can be recovered"
                 )
-            return self._graph_for(ref).recover(
-                thread_id, clock=self.clock, audit=self._stores.audit
-            ).state
+            return (
+                self._graph_for(ref)
+                .recover(thread_id, clock=self.clock, audit=self._stores.audit)
+                .state
+            )
 
     # --- reading ---------------------------------------------------------------- #
 
-    def scenario_runs(self) -> dict[ScenarioName, ScenarioRun]:
+    def scenario_runs(self) -> dict[ScenarioName | str, ScenarioRun]:
         with self._locked():
             return dict(self._scenarios)
 
@@ -947,9 +1097,7 @@ class Workspace:
             index = self.graph.index_of(node_id)
             explanation = explain_node(graph, node_id, risk_score=float(self.scores[index]))
             share = float(self.shares[index])
-            return replace(
-                explanation, own_feature_share=1.0 - share, neighbourhood_share=share
-            )
+            return replace(explanation, own_feature_share=1.0 - share, neighbourhood_share=share)
 
     def failed_actions(self) -> list[tuple[ThreadRef, Any]]:
         with self._locked():
@@ -969,15 +1117,15 @@ class Workspace:
             ]
 
 
-def scenario_threads(workspace: Workspace, name: ScenarioName) -> list[ThreadRef]:
-    return [ref for ref in workspace.refs() if ref.scenario is name]
+def scenario_threads(workspace: Workspace, name: ScenarioName | str) -> list[ThreadRef]:
+    return [ref for ref in workspace.refs() if _tag_value(ref.scenario) == _tag_value(name)]
 
 
 @dataclass(frozen=True, slots=True)
 class ScenarioProgress:
     """Where one scenario stands, derived from its threads' checkpointed states."""
 
-    name: ScenarioName
+    name: ScenarioName | str
     launched: bool
     total: int
     waiting: int
@@ -1004,8 +1152,8 @@ class ScenarioProgress:
         )
 
 
-def scenario_progress(workspace: Workspace, name: ScenarioName) -> ScenarioProgress:
-    launched = name in workspace.scenario_runs()
+def scenario_progress(workspace: Workspace, name: ScenarioName | str) -> ScenarioProgress:
+    launched = any(_tag_value(k) == _tag_value(name) for k in workspace.scenario_runs())
     refs = scenario_threads(workspace, name)
     waiting = running = finished = failed_runs = failed_actions = decisions = 0
     for ref in refs:

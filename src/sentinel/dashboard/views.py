@@ -44,6 +44,7 @@ from sentinel.dashboard.workspace import (
     GraphKind,
     ThreadRef,
     Workspace,
+    _tag_value,
     scenario_progress,
 )
 from sentinel.graph.explain import ExposurePath, NodeExplanation, top_risk_explanations
@@ -206,12 +207,14 @@ def incident_summary(ref: ThreadRef, state: IncidentState) -> dict[str, Any]:
     severity = (
         state.report.severity.value
         if state.report is not None
-        else None if triage is None else triage.severity.value
+        else None
+        if triage is None
+        else triage.severity.value
     )
     return {
         "incident_id": state.incident_id,
         "kind": ref.kind,
-        "scenario": None if ref.scenario is None else ref.scenario.value,
+        "scenario": _tag_value(ref.scenario),
         "caption": ref.caption,
         "advisory_id": ref.advisory_id,
         "status": state.status.value,
@@ -392,8 +395,9 @@ def queue_view(workspace: Workspace) -> list[dict[str, Any]]:
     )
 
 
-def incidents_view(workspace: Workspace, *, status: str | None = None,
-                   kind: str | None = None, limit: int = 200) -> dict[str, Any]:
+def incidents_view(
+    workspace: Workspace, *, status: str | None = None, kind: str | None = None, limit: int = 200
+) -> dict[str, Any]:
     rows = [incident_summary(ref, state) for ref, state in workspace.states()]
     rows.reverse()  # newest first
     if status:
@@ -435,9 +439,7 @@ def overview(workspace: Workspace) -> dict[str, Any]:
         "incidents": len(states),
         "by_status": by_status,
         "queue": sum(1 for _, state in states if state.is_waiting),
-        "stalled": sum(
-            1 for _, s in states if not s.status.is_terminal and not s.is_waiting
-        ),
+        "stalled": sum(1 for _, s in states if not s.status.is_terminal and not s.is_waiting),
         "alerts_ingested": ingested,
         "alerts_reaching_human": reached_human,
         "alert_reduction": None if ingested == 0 else 1.0 - reached_human / ingested,
@@ -482,19 +484,67 @@ def audit_chain_view(workspace: Workspace) -> dict[str, Any]:
     return _chain_view(workspace.verify_audit(), fresh=not workspace.refs())
 
 
+def real_scenarios_view(workspace: Workspace) -> list[dict[str, Any]]:
+    """The real workspace's launchable cases, in the same shape as the scripted scenarios."""
+    from sentinel.real.scenarios import real_scenarios
+
+    runs = {_tag_value(k): v for k, v in workspace.scenario_runs().items()}
+    items = []
+    for spec in real_scenarios(workspace.models):
+        progress = scenario_progress(workspace, spec.id)
+        run = runs.get(spec.id)
+        threads = [
+            {
+                "incident_id": ref.thread_id,
+                "caption": ref.caption,
+                "kind": ref.kind,
+                "status": workspace.state(ref.thread_id).status.value,
+            }
+            for ref in workspace.refs()
+            if _tag_value(ref.scenario) == spec.id
+        ][-8:]
+        items.append(
+            {
+                "name": spec.id,
+                "title": spec.title,
+                "summary": spec.summary,
+                "walkthrough": list(spec.walkthrough),
+                "agents": list(spec.agents),
+                # a campaign can be launched again; the others are once each
+                "launched": progress.launched and spec.kind != "campaign",
+                "launched_at": None if run is None else _iso(run.launched_at),
+                "launched_by": None if run is None else run.launched_by,
+                "complete": progress.complete,
+                "total": progress.total,
+                "waiting": progress.waiting,
+                "running": progress.running,
+                "finished": progress.finished,
+                "failed_runs": progress.failed_runs,
+                "failed_actions": progress.failed_actions,
+                "decisions": progress.decisions,
+                "threads": threads,
+            }
+        )
+    return items
+
+
 def scenarios_view(workspace: Workspace) -> list[dict[str, Any]]:
     if workspace.models.mode == "real":
-        return []  # scripted stories belong to the synthetic demo
+        return real_scenarios_view(workspace)
     runs = workspace.scenario_runs()
     items = []
     for name, spec in SCENARIOS.items():
         progress = scenario_progress(workspace, name)
         run = runs.get(name)
         threads = [
-            {"incident_id": ref.thread_id, "caption": ref.caption, "kind": ref.kind,
-             "status": workspace.state(ref.thread_id).status.value}
+            {
+                "incident_id": ref.thread_id,
+                "caption": ref.caption,
+                "kind": ref.kind,
+                "status": workspace.state(ref.thread_id).status.value,
+            }
             for ref in workspace.refs()
-            if ref.scenario is name
+            if _tag_value(ref.scenario) == _tag_value(name)
         ]
         items.append(
             {
@@ -547,8 +597,11 @@ def wire_view(workspace: Workspace) -> dict[str, Any]:
             _refusal(r) for r in records if r.event_type is AuditEventType.GUARDRAIL_BLOCKED
         ],
         "failed_actions": failed,
-        "calls": {"total": len(calls), "by_connector": by_connector,
-                  "recent": [audit_view(r) for r in calls[-25:]]},
+        "calls": {
+            "total": len(calls),
+            "by_connector": by_connector,
+            "recent": [audit_view(r) for r in calls[-25:]],
+        },
         "remote": {
             "wazuh": {
                 "isolated_hosts": sorted(sandbox.wazuh.isolated_hosts()),
@@ -557,14 +610,24 @@ def wire_view(workspace: Workspace) -> dict[str, Any]:
             },
             "github": {
                 "pulls": [
-                    {"number": p["number"], "title": p["title"], "draft": p["draft"],
-                     "state": p["state"], "merged": p["merged"], "url": p["html_url"],
-                     "head": p["head"]["ref"]}
+                    {
+                        "number": p["number"],
+                        "title": p["title"],
+                        "draft": p["draft"],
+                        "state": p["state"],
+                        "merged": p["merged"],
+                        "url": p["html_url"],
+                        "head": p["head"]["ref"],
+                    }
                     for p in sandbox.github.pulls
                 ],
                 "issues": [
-                    {"number": i["number"], "title": i["title"], "state": i["state"],
-                     "url": i["html_url"]}
+                    {
+                        "number": i["number"],
+                        "title": i["title"],
+                        "state": i["state"],
+                        "url": i["html_url"],
+                    }
                     for i in sandbox.github.issues
                 ],
                 "merges": sandbox.github.merges,
@@ -632,8 +695,11 @@ def node_view(explanation: NodeExplanation, graph: SupplyChainGraph) -> dict[str
 
 
 def _nodes_and_edges(
-    graph: SupplyChainGraph, ids: Iterable[str], scores: np.ndarray,
-    shares: np.ndarray, sources: set[str],
+    graph: SupplyChainGraph,
+    ids: Iterable[str],
+    scores: np.ndarray,
+    shares: np.ndarray,
+    sources: set[str],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     keep = set(ids)
     nodes = []
@@ -688,9 +754,12 @@ def graph_view(workspace: Workspace, *, scope: str = "top", k: int = 10) -> dict
             "published_at": _iso(published.published_at),
         }
         explanations = top_risk_explanations(
-            published.subgraph, published.scores, k=10,
+            published.subgraph,
+            published.scores,
+            k=10,
             shares=np.array([shares[graph.index_of(n)] for n in published.subgraph.node_ids()]),
-            include=(published.advisory.package_id,), max_hops=4,
+            include=(published.advisory.package_id,),
+            max_hops=4,
         )
         for explanation in explanations:
             highlight.extend(list(path.nodes) for path in explanation.paths[:1])
@@ -717,15 +786,24 @@ def graph_view(workspace: Workspace, *, scope: str = "top", k: int = 10) -> dict
         "nodes": nodes,
         "edges": edges,
         "flagged": [
-            {"node_id": e.node_id, "kind": e.kind.value, "risk": _finite(e.risk_score),
-             "intrinsic": e.is_intrinsically_risky, "driver": e.dominant_driver,
-             "paths": len(e.paths)}
+            {
+                "node_id": e.node_id,
+                "kind": e.kind.value,
+                "risk": _finite(e.risk_score),
+                "intrinsic": e.is_intrinsically_risky,
+                "driver": e.dominant_driver,
+                "paths": len(e.paths),
+            }
             for e in explanations
         ],
         "highlight": highlight,
         "advisories": [
-            {"advisory_id": p.advisory.advisory_id, "title": p.advisory.title,
-             "package_id": p.advisory.package_id, "kind": p.advisory.kind.value}
+            {
+                "advisory_id": p.advisory.advisory_id,
+                "title": p.advisory.title,
+                "package_id": p.advisory.package_id,
+                "kind": p.advisory.kind.value,
+            }
             for p in workspace.advisories()
         ],
         "counts": {
@@ -765,7 +843,7 @@ def code_scan_view(workspace: Workspace) -> dict[str, Any] | None:
     return {
         "incident_id": ref.thread_id,
         "status": state.status.value,
-        "repository": "acme/billing",
+        "repository": workspace.models.repository,
         "files_scanned": assessment.scan.files_scanned,
         "lines_scanned": assessment.scan.lines_scanned,
         "summary": assessment.scan.summary(),
@@ -797,8 +875,14 @@ def code_scan_view(workspace: Workspace) -> dict[str, Any] | None:
             "files": list(draft.files_touched),
             "unpatched_refs": list(draft.unpatched_refs),
             "patches": [
-                {"finding_ref": p.finding_ref, "path": p.path, "rule_id": p.rule_id,
-                 "diff": p.diff, "checks": list(p.checks), "notes": list(p.notes)}
+                {
+                    "finding_ref": p.finding_ref,
+                    "path": p.path,
+                    "rule_id": p.rule_id,
+                    "diff": p.diff,
+                    "checks": list(p.checks),
+                    "notes": list(p.notes),
+                }
                 for p in draft.patches
             ],
             "diff_sha256": diff_digest,
@@ -864,9 +948,7 @@ def evaluation_view(path: Path) -> dict[str, Any]:
         "per_family_recall": test.get("per_family_recall"),
         "timing": agents.get("timing"),
         "supply_chain_top_k_precision": (data.get("supply_chain") or {}).get("test"),
-        "response_policy_regret_ratio": (data.get("response_policy") or {}).get(
-            "regret_ratio"
-        ),
+        "response_policy_regret_ratio": (data.get("response_policy") or {}).get("regret_ratio"),
         "regret_curves": (data.get("response_policy") or {}).get("curves"),
         "augmentation": _augmentation_summary(data.get("augmentation")),
     }
@@ -882,4 +964,3 @@ def evaluation_view(path: Path) -> dict[str, Any]:
         "headline": headline,
         "sections": sorted(key for key, item in data.items() if isinstance(item, dict)),
     }
-

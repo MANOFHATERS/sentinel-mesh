@@ -89,7 +89,11 @@ def test_real_flows_run_through_the_whole_incident_pipeline(real_workspace):
     outcome = real_workspace.replay(80)
     assert outcome["ingested"] == 80 and outcome["failed"] == 0
     overview = views.overview(real_workspace)
-    assert overview["incidents"] == 80 and overview["scenarios"] == []
+    assert overview["incidents"] == 80
+    # with no supply chain or repository loaded, the launchable cases are the real campaigns
+    assert overview["scenarios"] and all(
+        c["name"].startswith("campaign-") for c in overview["scenarios"]
+    )
     assert overview["audit"]["status"] == "verified" and overview["ungated_executions"] == []
     reports = [s.report for _r, s in real_workspace.states() if s.report is not None]
     assert reports, "an escalated real flow should have been investigated"
@@ -118,12 +122,14 @@ def test_a_declared_workspace_is_preparing_until_it_is_ready():
     with pytest.raises(WorkspaceUnavailable, match="being prepared") as info:
         registry["real"]
     assert not info.value.failed
-    assert registry.describe("real") == {
+    described = registry.describe("real")
+    assert {k: described[k] for k in ("mode", "dataset", "state", "error")} == {
         "mode": "real",
         "dataset": "UNSW-NB15 (real)",
         "state": "preparing",
         "error": None,
     }
+    assert described["features"]["kb"] is True
     assert registry.ready_items() == []
     registry.set_failed("real", "disk full")
     with pytest.raises(WorkspaceUnavailable, match="could not be built") as info:
@@ -170,18 +176,47 @@ def test_the_session_says_which_data_this_login_sees(two_worlds):
 
 @pytest.mark.parametrize(
     "path",
-    [
-        "/api/scenarios",
-        "/api/supply-chain/graph",
-        "/api/supply-chain/nodes/x",
-        "/api/code-scan",
-        "/api/models",
-    ],
+    ["/api/supply-chain/graph", "/api/supply-chain/nodes/x", "/api/code-scan"],
 )
-def test_a_real_workspace_refuses_what_has_no_real_data_behind_it(two_worlds, path):
+def test_a_real_workspace_refuses_a_page_that_no_real_data_backs(two_worlds, path):
+    # this workspace was built without a real supply-chain snapshot or repository
     refused = two_worlds.get(path, headers=REAL_ANALYST)
     assert refused.status_code == 404
     assert "real-data workspace" in refused.json()["detail"]
+
+
+def test_a_real_workspace_serves_the_pages_that_real_data_does_back(two_worlds):
+    scenarios = two_worlds.get("/api/scenarios", headers=REAL_ANALYST)
+    assert scenarios.status_code == 200 and scenarios.json()
+    models = two_worlds.get("/api/models", headers=REAL_ANALYST).json()
+    assert models["mode"] == "real" and models["diffusion"]["status"] == "not_applicable"
+    assert "simulator" in models["policy"]["trained_on"]
+    features = two_worlds.get("/api/session", headers=REAL_ANALYST).json()["features"]
+    assert features == {
+        "scenarios": True,
+        "supply_chain": False,
+        "code_scan": False,
+        "models": True,
+        "kb": True,
+    }
+
+
+def test_the_launch_route_launches_real_cases_in_a_real_workspace(two_worlds):
+    cards = two_worlds.get("/api/scenarios", headers=REAL_ANALYST).json()
+    name = cards[0]["name"]
+    denied = two_worlds.post(f"/api/scenarios/{name}/launch", headers=REAL_VIEWER)
+    assert denied.status_code == 403
+    launched = two_worlds.post(f"/api/scenarios/{name}/launch", headers=REAL_ANALYST)
+    assert launched.status_code == 202 or launched.status_code == 200
+    assert len(launched.json()["incidents"]) == 5
+    assert (
+        two_worlds.post("/api/scenarios/nonsense/launch", headers=REAL_ANALYST).status_code == 404
+    )
+    # the synthetic tenant still launches scripted scenarios by their own names
+    assert two_worlds.post("/api/scenarios/phishing-lateral/launch", headers=ACME).status_code in (
+        200,
+        202,
+    )
 
 
 def test_the_synthetic_login_is_untouched_by_the_real_workspace(two_worlds):

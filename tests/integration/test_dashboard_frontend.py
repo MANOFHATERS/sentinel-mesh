@@ -74,22 +74,12 @@ def test_the_login_decides_the_data_not_a_separate_page():
     source = (STATIC / "js" / "app.js").read_text(encoding="utf-8")
     # no standalone "Real data" page: the real login gets a whole real workspace instead
     assert '["real", "Real data"]' not in source and "viewReal()" not in source
-    # the sidebar is chosen from the session, and the real one omits what has no real data
-    assert "isReal() ? NAV_REAL : NAV" in source
-    real_nav = source.split("const NAV_REAL = [")[1].split("];")[0]
-    for offered in (
-        "overview",
-        "queue",
-        "incidents",
-        "code-scan",
-        "wire",
-        "audit",
-        "kb",
-        "evaluation",
-    ):
-        assert f'["{offered}"' in real_nav
-    for hidden in ("scenarios", "supply-chain", "models"):
-        assert f'["{hidden}"' not in real_nav
+    # one sidebar, filtered by the features the server says have data behind them for this login
+    assert "navItems().map(" in source and "features[feature]" in source
+    nav = source.split("const NAV = [")[1].split("];")[0]
+    assert '["supply-chain", "Supply chain", "supply_chain"]' in nav
+    assert '["code-scan", "Code scan", "code_scan"]' in nav
+    assert '["kb", "Knowledge base", "kb"]' in nav and '["scenarios", "Scenarios"]' in nav
     # the header says, in words, which data this login is looking at
     assert "REAL DATA" in source and "SYNTHETIC DEMO" in source
     # a workspace that is still building is explained, not shown as an error

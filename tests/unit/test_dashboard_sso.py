@@ -184,6 +184,13 @@ def test_analyst_group_signs_in_as_analyst(stack):
         "dataset": None,
         "workspace": "ready",
         "workspace_error": None,
+        "features": {
+            "scenarios": True,
+            "supply_chain": True,
+            "code_scan": True,
+            "models": True,
+            "kb": False,
+        },
     }
 
 

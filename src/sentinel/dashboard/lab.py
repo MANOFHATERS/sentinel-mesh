@@ -65,8 +65,7 @@ POLICY_EPISODES: Final[int] = 1500
 #: Scarcity levels for the diffusion study, matching ``evaluate.py --augment``:
 #: the rare-family row cap per family, ``None`` meaning all the data.
 DIFFUSION_LEVELS: Final[tuple[int | None, ...]] = (None, 200, 60, 25, 12)
-RARE_FAMILIES: Final[tuple[str, ...]] = ("web_attack", "botnet", "infiltration",
-                                          "brute_force")
+RARE_FAMILIES: Final[tuple[str, ...]] = ("web_attack", "botnet", "infiltration", "brute_force")
 
 
 def _downsample(values: np.ndarray | list[float], points: int = 200) -> list[float]:
@@ -203,9 +202,7 @@ def graph_evaluation(graph, truth, gnn, split, *, k: int = 10) -> dict[str, Any]
         "k": k,
         "test_nodes": len(test),
         "gnn_top_k_precision": top_k_precision(scores[test], labels[test], k),
-        "features_only_top_k_precision": top_k_precision(
-            baseline_scores[test], labels[test], k
-        ),
+        "features_only_top_k_precision": top_k_precision(baseline_scores[test], labels[test], k),
         "target": 0.80,
         "note": (
             "One seed. F-06 is asserted as the mean over 10 seeds by the evaluation "
@@ -247,8 +244,7 @@ class DiffusionStudy:
         with self._lock:
             if self._thread is not None:
                 return self
-            self._thread = threading.Thread(target=self.run, name="diffusion-study",
-                                            daemon=True)
+            self._thread = threading.Thread(target=self.run, name="diffusion-study", daemon=True)
             self._thread.start()
         return self
 
@@ -293,16 +289,21 @@ class DiffusionStudy:
                 sub_x, sub_f = x_train[chosen], list(f_train[chosen])
                 rare_mask = np.isin(np.asarray(sub_f), RARE_FAMILIES)
                 generator = TabularDiffusion(
-                    n_steps=200, epochs=self.epochs, hidden=(160, 160), seed=1,
+                    n_steps=200,
+                    epochs=self.epochs,
+                    hidden=(160, 160),
+                    seed=1,
                     min_rows_per_family=8,
                 ).fit(sub_x[rare_mask], list(np.asarray(sub_f)[rare_mask]))
                 augmented = augment_training_set(
-                    sub_x, sub_f, generator=generator,
-                    multiplier=6.0 if cap else 3.0, rng=np.random.default_rng(11),
+                    sub_x,
+                    sub_f,
+                    generator=generator,
+                    multiplier=6.0 if cap else 3.0,
+                    rng=np.random.default_rng(11),
                 )
                 before = recall(FamilyClassifier(seed=5).fit(sub_x, sub_f))
-                after = recall(FamilyClassifier(seed=5).fit(augmented.x,
-                                                            list(augmented.families)))
+                after = recall(FamilyClassifier(seed=5).fit(augmented.x, list(augmented.families)))
                 row = {
                     "level": "all data" if cap is None else f"{cap} per family",
                     "real_rare_rows": int(rare_mask.sum()),
@@ -379,7 +380,19 @@ def _gnn(models) -> dict[str, Any]:
 
 def model_report(models, *, policy: ServingPolicy | None = None) -> dict[str, Any]:
     """Every model's training record, from this process's own start-up run."""
+    real = models.mode == "real"
+    supply = models.real_supply
     return {
+        "mode": models.mode,
+        "real_supply": None
+        if not (real and supply)
+        else {
+            "truth": supply["truth"],
+            "sources": supply["sources"],
+            "generated_at": supply["generated_at"],
+            "projects": supply["projects"],
+            "cycle_edges_cut": supply["cycle_edges_cut"],
+        },
         "seed": models.seed,
         "autoencoder": _autoencoder(models),
         "gnn": _gnn(models),
@@ -387,6 +400,20 @@ def model_report(models, *, policy: ServingPolicy | None = None) -> dict[str, An
             **models.policy_training.as_dict(),
             "live_decisions": 0 if policy is None else policy.decisions,
             "serving": "greedy (posterior mean); no online learning from dashboard clicks",
+            "trained_on": "the project's response simulator, in every workspace: there is no "
+            "public dataset of real analyst decisions and their outcomes",
         },
-        "diffusion": models.diffusion.view(),
+        # The diffusion study generates synthetic attack rows; it says nothing about real data.
+        "diffusion": {
+            "status": "not_applicable",
+            "error": None,
+            "levels_total": 0,
+            "levels_done": 0,
+            "results": [],
+            "loss_curve": [],
+            "seconds": None,
+            "rare_families": [],
+        }
+        if real
+        else models.diffusion.view(),
     }

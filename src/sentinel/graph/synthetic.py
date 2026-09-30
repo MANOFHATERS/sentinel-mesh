@@ -75,6 +75,7 @@ __all__ = [
     "GroundTruth",
     "SyntheticGraphGenerator",
     "build_demo_graph",
+    "label_ground_truth",
 ]
 
 #: Transitive depth of the package tree. PRD Section 5.5.3 speaks of fourth-order
@@ -509,114 +510,130 @@ class SyntheticGraphGenerator:
     # --- ground truth -------------------------------------------------------
 
     def _label(self, graph: SupplyChainGraph) -> GroundTruth:
-        """Intrinsic risk, plus inherited risk as **decayed accumulated exposure**.
+        return label_ground_truth(
+            graph, exposure_hops=self.exposure_hops, exposure_threshold=self.exposure_threshold
+        )
 
+
+def label_ground_truth(
+    graph: SupplyChainGraph,
+    *,
+    exposure_hops: int = EXPOSURE_HOPS,
+    exposure_threshold: float = EXPOSURE_THRESHOLD,
+) -> GroundTruth:
+    """Intrinsic risk, plus inherited risk as **decayed accumulated exposure**.
+    
         The first version of this used binary reachability — exposed to any risky
         package within 4 hops means high-risk — and it produced a useless
         benchmark: 32/32 vendors and 4/4 organisations positive, nothing to rank.
-
+    
         Distance-decayed accumulation fixes that and is the more defensible model
         anyway. Two things a binary rule cannot express, and both are how
         practitioners actually reason:
-
+    
         *   **Distance attenuates risk.** A CVE in a direct dependency is a
             different problem from the same CVE five levels down behind two
             abstraction layers. ``DECAY ** hops`` says so quantitatively.
         *   **Exposures accumulate.** A vendor pulling in six separately-abandoned
             libraries is in worse shape than one pulling in a single one, and a
             reachability predicate scores them identically.
-
+    
         The resulting label is a threshold on a *graded* quantity, which is also
         what makes it a fair target for a model that outputs a score: the ordering
         it has to learn exists in the ground truth rather than being an artefact of
         where a boolean happened to cut.
         """
-        intrinsic = {
-            node.node_id
-            for node in graph.nodes
-            if node.kind is NodeKind.PACKAGE
-            and node.cve_exposure_count >= INTRINSIC_CVE_THRESHOLD
-            and node.is_unmaintained
-        }
-        if not intrinsic:
-            raise GraphError("no intrinsically risky packages were generated")
+    # Public so the same rule labels a graph built from real data: intrinsic risk is a
+    # package with enough CVEs that is also stale; inherited risk is distance-decayed
+    # exposure to those. The rule is a definition, so the labels are as real as the
+    # features and the structure they are computed from.
 
-        def severity_of(node_id: str) -> float:
-            return min(
-                1.0, graph.node(node_id).cve_exposure_count / SEVERITY_NORMALISER
-            )
+    intrinsic = {
+        node.node_id
+        for node in graph.nodes
+        if node.kind is NodeKind.PACKAGE
+        and node.cve_exposure_count >= INTRINSIC_CVE_THRESHOLD
+        and node.is_unmaintained
+    }
+    if not intrinsic:
+        raise GraphError("no intrinsically risky packages were generated")
 
-        # One continuous risk quantity for every node, not two incompatible ones.
-        #
-        # The first version defined high-risk as the *union* of "is intrinsically
-        # risky" and "accumulated exposure >= threshold", and kept only the second
-        # as a score. That was incoherent, and it showed up as a measurement: an
-        # intrinsically risky package was labelled high-risk while carrying an
-        # exposure score of 0.0, because the propagation loop skipped intrinsic
-        # nodes. A model regressing on the score therefore ranked the genuinely
-        # compromised packages *last* and still scored a respectable rank
-        # correlation (0.61) while its top-10 precision collapsed to 0.60.
-        #
-        # Intrinsic risk is now the node's own term in the same sum. INTRINSIC_BASE
-        # puts any intrinsically risky package above the threshold on its own
-        # account, so ``intrinsic`` is a subset of ``high_risk`` by construction
-        # rather than by a union, and one threshold on one quantity defines the label.
-        risk: dict[str, float] = {
-            node_id: INTRINSIC_BASE + severity_of(node_id) for node_id in intrinsic
-        }
-        closest: dict[str, tuple[str, int]] = {}
-        for source in sorted(intrinsic):
-            severity = severity_of(source)
-            for node_id, hops in graph.downstream(
-                source, max_hops=self.exposure_hops
-            ).items():
-                risk[node_id] = risk.get(node_id, 0.0) + severity * (DECAY ** hops)
-                # Keep the nearest, most severe source for the explainer to be
-                # checked against. Ties broken by severity, then id, for determinism.
-                previous = closest.get(node_id)
-                if previous is None or (hops, -severity, source) < (
-                    previous[1],
-                    -severity_of(previous[0]),
-                    previous[0],
-                ):
-                    closest[node_id] = (source, hops)
-
-        inherited_paths: dict[str, tuple[str, ...]] = {}
-        for node_id, score in risk.items():
-            if node_id in intrinsic or score < self.exposure_threshold:
-                continue
-            source, hops = closest[node_id]
-            path = self._shortest_path(graph, source, node_id, hops)
-            if path is not None:
-                inherited_paths[node_id] = path
-
-        return GroundTruth(
-            intrinsic=frozenset(intrinsic),
-            inherited=frozenset(inherited_paths),
-            exposure_paths=inherited_paths,
-            risk_scores=dict(risk),
+    def severity_of(node_id: str) -> float:
+        return min(
+            1.0, graph.node(node_id).cve_exposure_count / SEVERITY_NORMALISER
         )
 
-    @staticmethod
-    def _shortest_path(
-        graph: SupplyChainGraph, source: str, target: str, hops: int
-    ) -> tuple[str, ...] | None:
-        """Reconstruct one shortest ``source -> target`` path of length ``hops``."""
-        frontier: list[tuple[str, ...]] = [(source,)]
-        for _ in range(hops):
-            next_frontier: list[tuple[str, ...]] = []
-            for path in frontier:
-                for neighbour in graph.targets_of(path[-1]):
-                    if neighbour in path:
-                        continue
-                    extended = (*path, neighbour)
-                    if neighbour == target:
-                        return extended
-                    next_frontier.append(extended)
-            frontier = next_frontier
-            if not frontier:
-                return None
-        return None
+    # One continuous risk quantity for every node, not two incompatible ones.
+    #
+    # The first version defined high-risk as the *union* of "is intrinsically
+    # risky" and "accumulated exposure >= threshold", and kept only the second
+    # as a score. That was incoherent, and it showed up as a measurement: an
+    # intrinsically risky package was labelled high-risk while carrying an
+    # exposure score of 0.0, because the propagation loop skipped intrinsic
+    # nodes. A model regressing on the score therefore ranked the genuinely
+    # compromised packages *last* and still scored a respectable rank
+    # correlation (0.61) while its top-10 precision collapsed to 0.60.
+    #
+    # Intrinsic risk is now the node's own term in the same sum. INTRINSIC_BASE
+    # puts any intrinsically risky package above the threshold on its own
+    # account, so ``intrinsic`` is a subset of ``high_risk`` by construction
+    # rather than by a union, and one threshold on one quantity defines the label.
+    risk: dict[str, float] = {
+        node_id: INTRINSIC_BASE + severity_of(node_id) for node_id in intrinsic
+    }
+    closest: dict[str, tuple[str, int]] = {}
+    for source in sorted(intrinsic):
+        severity = severity_of(source)
+        for node_id, hops in graph.downstream(
+            source, max_hops=exposure_hops
+        ).items():
+            risk[node_id] = risk.get(node_id, 0.0) + severity * (DECAY ** hops)
+            # Keep the nearest, most severe source for the explainer to be
+            # checked against. Ties broken by severity, then id, for determinism.
+            previous = closest.get(node_id)
+            if previous is None or (hops, -severity, source) < (
+                previous[1],
+                -severity_of(previous[0]),
+                previous[0],
+            ):
+                closest[node_id] = (source, hops)
+
+    inherited_paths: dict[str, tuple[str, ...]] = {}
+    for node_id, score in risk.items():
+        if node_id in intrinsic or score < exposure_threshold:
+            continue
+        source, hops = closest[node_id]
+        path = _shortest_path(graph, source, node_id, hops)
+        if path is not None:
+            inherited_paths[node_id] = path
+
+    return GroundTruth(
+        intrinsic=frozenset(intrinsic),
+        inherited=frozenset(inherited_paths),
+        exposure_paths=inherited_paths,
+        risk_scores=dict(risk),
+    )
+
+
+def _shortest_path(
+graph: SupplyChainGraph, source: str, target: str, hops: int
+) -> tuple[str, ...] | None:
+    """Reconstruct one shortest ``source -> target`` path of length ``hops``."""
+    frontier: list[tuple[str, ...]] = [(source,)]
+    for _ in range(hops):
+        next_frontier: list[tuple[str, ...]] = []
+        for path in frontier:
+            for neighbour in graph.targets_of(path[-1]):
+                if neighbour in path:
+                    continue
+                extended = (*path, neighbour)
+                if neighbour == target:
+                    return extended
+                next_frontier.append(extended)
+        frontier = next_frontier
+        if not frontier:
+            return None
+    return None
 
 
 DTYPE = np.float64

@@ -18,7 +18,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from sentinel.dashboard.workspace import Workspace, WorkspaceError
+from sentinel.dashboard.workspace import Workspace, WorkspaceError, workspace_features
 
 __all__ = ["WorkspaceRegistry", "WorkspaceUnavailable"]
 
@@ -32,6 +32,7 @@ class WorkspaceUnavailable(WorkspaceError):
 
 
 _PRETTY = {"unsw-nb15": "UNSW-NB15", "cic-ids2017": "CIC-IDS2017"}
+_ALL = {"scenarios": True, "supply_chain": True, "code_scan": True, "models": True, "kb": False}
 
 
 @dataclass(slots=True)
@@ -117,6 +118,7 @@ class WorkspaceRegistry(Mapping[str, Workspace]):
                 "dataset": _PRETTY.get(report.get("dataset"), report.get("dataset")),
                 "state": "ready",
                 "error": None,
+                "features": workspace_features(models) if models is not None else _ALL,
             }
         if declared is not None:
             return {
@@ -124,5 +126,12 @@ class WorkspaceRegistry(Mapping[str, Workspace]):
                 "dataset": declared.dataset,
                 "state": declared.state,
                 "error": declared.error,
+                "features": {**_ALL, "kb": declared.mode == "real"},
             }
-        return {"mode": "synthetic", "dataset": None, "state": "ready", "error": None}
+        return {
+            "mode": "synthetic",
+            "dataset": None,
+            "state": "ready",
+            "error": None,
+            "features": _ALL,
+        }

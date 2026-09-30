@@ -149,32 +149,26 @@ function statTile(label, value, note, tone = "neutral") {
 // Shell
 // --------------------------------------------------------------------------- //
 
+// Each page may name the feature it needs. The server says which pages have data behind them for
+// this login (a real workspace has a page only if real data backs it), and the sidebar follows.
 const NAV = [
   ["overview", "Overview"],
   ["scenarios", "Scenarios"],
   ["queue", "Approval queue"],
   ["incidents", "Incidents"],
-  ["supply-chain", "Supply chain"],
-  ["code-scan", "Code scan"],
+  ["supply-chain", "Supply chain", "supply_chain"],
+  ["code-scan", "Code scan", "code_scan"],
   ["wire", "Wire & guardrails"],
   ["audit", "Audit log"],
   ["models", "Models"],
+  ["kb", "Knowledge base", "kb"],
   ["evaluation", "Evaluation"],
 ];
 
-// A real-data workspace shows only what has real data behind it. The scripted scenarios, the
-// synthetic supply-chain map and the synthetic model records have no real counterpart yet, so
-// they are not offered there, rather than shown under a real-data label.
-const NAV_REAL = [
-  ["overview", "Overview"],
-  ["queue", "Approval queue"],
-  ["incidents", "Incidents"],
-  ["code-scan", "Code scan"],
-  ["wire", "Wire & guardrails"],
-  ["audit", "Audit log"],
-  ["kb", "Knowledge base"],
-  ["evaluation", "Evaluation"],
-];
+function navItems() {
+  const features = (session && session.features) || {};
+  return NAV.filter(([, , feature]) => !feature || features[feature]);
+}
 
 function isReal() {
   return Boolean(session) && session.data_mode === "real";
@@ -193,7 +187,7 @@ function renderShell() {
   const nav = h(
     "nav",
     { class: "nav", "aria-label": "Sections" },
-    (isReal() ? NAV_REAL : NAV).map(([name, label]) => {
+    navItems().map(([name, label]) => {
       const item = h("a", { href: `#/${name}`, class: "nav-item" }, label, name === "queue" ? queueCountEl : null);
       navEls[name] = item;
       return item;
@@ -605,9 +599,14 @@ async function viewOverview() {
     isReal()
       ? h(
           "div",
-          { class: "alert" },
-          h("strong", {}, "This workspace runs on real public data. "),
-          `The alerts below are real held-out network flows from ${session.dataset || "a public capture"}, scored by a triage model trained on the real training split; investigations cite MITRE's real ATT&CK catalogue. This dataset carries no host addresses, so the "asset" on an incident is the flow record itself, and a containment action against it is simulated on the local emulators. There are no scripted scenarios here.`,
+          { class: "stack" },
+          h(
+            "div",
+            { class: "alert" },
+            h("strong", {}, "This workspace runs on real public data. "),
+            `The alerts are real held-out network flows from ${session.dataset || "a public capture"}, scored by a triage model trained on the real training split; investigations cite MITRE's real ATT&CK catalogue; the supply chain is six real projects' pinned dependencies with their real known vulnerabilities; the code scan reads a real open-source project. This capture carries no host addresses, so the "asset" on an incident is the flow record itself, and a containment action against it runs on the local emulators.`,
+          ),
+          section("Launch a real case", h("div", { class: "cards" }, overview.scenarios.map((sc) => scenarioCard(sc, { compact: true })))),
         )
       : section("Demo scenarios", h("div", { class: "cards" }, overview.scenarios.map((sc) => scenarioCard(sc, { compact: true })))),
     replayPanel(overview.feed_remaining),
@@ -1190,10 +1189,20 @@ function nodePanel(node) {
 // --- code scan --------------------------------------------------------------- //
 
 async function viewCodeScan() {
-  if (isReal()) return viewRealCodeScan();
+  if (isReal()) {
+    const [page, runs] = await Promise.all([viewCodeScanPrimary(), api.get("/api/runs")]);
+    page.appendChild(realScanPanel(runs));
+    const job = runs.jobs.real_scan;
+    if (job && job.state === "done" && job.result) page.appendChild(realScanResult(job.result));
+    return page;
+  }
+  return viewCodeScanPrimary();
+}
+
+async function viewCodeScanPrimary() {
   const data = await api.get("/api/code-scan");
   if (!data.available) {
-    return h("div", { class: "stack" }, h("h1", {}, "Code scan"), empty("No scan has run yet. Launch the vendor-dependency CVE scenario to scan acme/billing."));
+    return h("div", { class: "stack" }, h("h1", {}, "Code scan"), empty(isReal() ? "The project's own code has not been scanned yet. Launch the real code scan from Scenarios." : "No scan has run yet. Launch the vendor-dependency CVE scenario to scan acme/billing."));
   }
   const scan = data.scan;
   const findings = scan.findings.map((f) =>
@@ -1471,8 +1480,8 @@ async function viewModels() {
     h("h1", {}, "Models"),
     panel,
     live,
-    h("h2", { class: "sub-h" }, "Trained at server start-up"),
-    ...modelsBody(m, { diffusion: true }),
+    h("h2", { class: "sub-h" }, m.mode === "real" ? "Trained for this workspace" : "Trained at server start-up"),
+    ...modelsBody(m, { diffusion: m.mode !== "real" }),
   );
 }
 
@@ -1535,6 +1544,13 @@ function modelsBody(m, { diffusion }) {
     section(
       "Supply-chain risk — 2-layer GraphSAGE (§5.5.3, F-06)",
       h("p", { class: "meta" }, `${gnn.objective} objective, ${gnn.aggregation} aggregation, ${gnn.n_parameters} parameters, best epoch ${gnn.best_epoch}. ${gnn.evaluation.note}`),
+      m.real_supply
+        ? h(
+            "p",
+            { class: "meta" },
+            `Trained on a real graph: ${m.real_supply.truth.nodes} nodes and ${m.real_supply.truth.edges} edges from ${m.real_supply.projects.length} real projects' pinned lockfiles (${m.real_supply.projects.join(", ")}), with real vulnerability records from OSV.dev as of ${m.real_supply.generated_at.slice(0, 10)}. The label is the same rule the synthetic benchmark uses (a package with 4 or more known vulnerabilities and an old pinned version is intrinsically risky; risk spreads to what depends on it, attenuated by distance): ${m.real_supply.truth.intrinsic} intrinsic and ${m.real_supply.truth.inherited} inherited high-risk nodes. The rule is a definition, so the labels are as real as the vulnerability data and dependency structure they are computed from. "Days since update" is the age of the version in use.${m.real_supply.cycle_edges_cut ? ` ${m.real_supply.cycle_edges_cut} dependency edge(s) that closed a cycle were dropped.` : ""}`,
+          )
+        : null,
       lineChart({
         title: "GNN loss per epoch",
         x: epochs(gnn.train_loss.length),
@@ -1556,6 +1572,7 @@ function modelsBody(m, { diffusion }) {
     section(
       "Response policy — contextual bandit (§5.5.4, F-09)",
       h("p", { class: "meta" }, `Thompson sampling, trained on ${pol.episodes} simulated incidents in ${fmtSeconds(pol.seconds)}. Served ${pol.serving}. Action mix while learning: ${Object.entries(pol.action_counts).map(([k, v]) => `${humanize(k)} ${v}`).join(", ")}.`),
+      pol.trained_on ? h("p", { class: "meta" }, `Trained on ${pol.trained_on}.`) : null,
       lineChart({
         title: "Cumulative regret while learning",
         x: pol.curve.episode,
@@ -1663,11 +1680,6 @@ async function viewRealEvaluation() {
 async function viewKb() {
   const status = await api.get("/api/real/status");
   return h("div", { class: "stack" }, h("h1", {}, "Knowledge base"), realKbPanel(status));
-}
-
-async function viewRealCodeScan() {
-  const runs = await api.get("/api/runs");
-  return h("div", { class: "stack" }, h("h1", {}, "Code scan"), realScanPanel(runs));
 }
 
 function needFile(title, status, what) {

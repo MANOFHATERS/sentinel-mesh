@@ -29,6 +29,7 @@ import stat
 import time
 import zipfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Final
 
 import httpx
@@ -41,6 +42,7 @@ __all__ = [
     "RepoError",
     "RepoRef",
     "fetch_zip",
+    "load_repo_snapshot",
     "parse_github_url",
     "scan_repository",
     "snapshot_from_zip",
@@ -173,6 +175,25 @@ def snapshot_from_zip(data: bytes, *, root: str) -> RepoSnapshot:
     if not files:
         raise RepoError("no Python files found (this scanner reads Python only)")
     return RepoSnapshot(root=root, files=tuple(files), skipped=tuple(skipped))
+
+
+def load_repo_snapshot(
+    repo: str, cache_dir: Path | str, *, client: httpx.Client | None = None
+) -> RepoSnapshot:
+    """A repository's Python sources, from a cached archive when there is one.
+
+    The first call downloads the archive (bounded, like every other fetch here) and keeps it, so
+    a later start is offline. Used for the real workspace's primary project.
+    """
+    ref = parse_github_url(f"https://github.com/{repo}")
+    cache = Path(cache_dir) / f"{ref.owner}__{ref.repo}.zip"
+    if cache.is_file():
+        data = cache.read_bytes()
+    else:
+        data = fetch_zip(ref, client=client)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_bytes(data)
+    return snapshot_from_zip(data, root=ref.name)
 
 
 def scan_repository(url: str, *, client: httpx.Client | None = None) -> dict[str, Any]:

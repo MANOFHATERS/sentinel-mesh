@@ -249,6 +249,8 @@ def test_session_reports_the_token_s_identity(stack):
         "principal": "maya@acme.example", "tenant_id": "acme", "role": "analyst",
         "can_act": True, "data_mode": "synthetic", "dataset": None,
         "workspace": "ready", "workspace_error": None,
+        "features": {"scenarios": True, "supply_chain": True, "code_scan": True,
+                     "models": True, "kb": False},
     }
 
 

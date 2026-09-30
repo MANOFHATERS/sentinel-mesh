@@ -174,8 +174,14 @@ def main(argv: list[str] | None = None) -> int:
 
         def build_real() -> None:
             try:
+                supply = Path("data/real/supply-chain.json")
                 real_models = MeshModels.build_real(
-                    models, dataset_path=dataset, attack_path=attack, seed=args.seed
+                    models,
+                    dataset_path=dataset,
+                    attack_path=attack,
+                    seed=args.seed,
+                    supply_chain_path=supply if supply.is_file() else None,
+                    repo_cache_dir=Path("data/real/repos"),
                 )
                 workspaces.set_ready(
                     "real", Workspace(real_models, tenant_id="real", workdir=root / "real")
