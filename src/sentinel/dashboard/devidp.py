@@ -141,6 +141,13 @@ _CSP: Final[str] = (
     "object-src 'none'; frame-ancestors 'none'; form-action 'self'"
 )
 
+#: Largest values the sign-in form accepts. Generated demo passwords are 16 characters, so 16 is
+#: the smallest limit that leaves them working.
+MAX_USERNAME: Final[int] = 30
+MAX_PASSWORD: Final[int] = 16
+MAX_CODE: Final[int] = 7
+MAX_FORM_BYTES: Final[int] = 4096
+
 
 def make_dev_idp(
     *,
@@ -184,9 +191,11 @@ def make_dev_idp(
             f'{message}<input type="hidden" name="rid" value="{escape(rid)}">'
             '<label for="username">Username</label>'
             '<input class="wide-input" id="username" name="username" type="email" required '
+            f'maxlength="{MAX_USERNAME}" '
             f'autocomplete="username" value="{escape(username)}" autofocus>'
             '<label for="password">Password</label>'
             '<input class="wide-input" id="password" name="password" type="password" required '
+            f'maxlength="{MAX_PASSWORD}" '
             'autocomplete="current-password">'
             '<label for="code">Authenticator code</label>'
             '<input class="wide-input" id="code" name="code" inputmode="numeric" '
@@ -235,13 +244,32 @@ def make_dev_idp(
 
     @app.post("/login")
     async def login(request: Request) -> Response:
-        parsed = parse_qs((await request.body()).decode("utf-8", "ignore"))
+        raw = await request.body()
+        if len(raw) > MAX_FORM_BYTES:
+            return HTMLResponse("request too large", status_code=413)
+        parsed = parse_qs(raw.decode("utf-8", "ignore"))
         form = {k: v[0] for k, v in parsed.items()}
         rid = form.get("rid", "")
-        username = form.get("username", "").strip()
+        submitted = form.get("username", "").strip()
+        # Over-long fields can never be right: they are refused before any hashing, and the
+        # username is cut so an attacker cannot fill the throttle table with huge keys.
+        too_long = (
+            len(submitted) > MAX_USERNAME
+            or len(form.get("password", "")) > MAX_PASSWORD
+            or len(form.get("code", "")) > MAX_CODE
+        )
+        username = submitted[:MAX_USERNAME]
         if rid not in requests:
             return HTMLResponse(
                 "This sign-in expired. Start again from the application.", status_code=400
+            )
+        if too_long:
+            throttle.failure(username)
+            return page(
+                rid,
+                error="Incorrect username, password or authenticator code.",
+                username=username,
+                status=401,
             )
         wait = throttle.locked_for(username)
         if wait > 0:

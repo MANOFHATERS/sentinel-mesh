@@ -70,7 +70,7 @@ class Clock:
         return self.t
 
 
-PASSWORD = "correct horse battery staple"
+PASSWORD = "horse-staple-42"
 
 
 class IdpClock:
@@ -896,3 +896,35 @@ def test_the_account_file_holds_hashes_and_secrets_but_never_a_password(tmp_path
 
     assert verify_password(created[maya][0], again.get(maya).password_hash)
     assert created["nina.nomfa@acme.example"][1] is None  # no second factor enrolled
+
+
+def test_over_long_credentials_are_refused_before_any_hashing(stack):
+    from sentinel.dashboard.devidp import MAX_PASSWORD, MAX_USERNAME
+
+    rid = start_login(stack)
+    page = stack.idp.get(
+        f"{urlparse(stack.app.get('/auth/login').headers['location']).path}"
+        f"?{urlparse(stack.app.get('/auth/login').headers['location']).query}"
+    )
+    assert f'maxlength="{MAX_USERNAME}"' in page.text and f'maxlength="{MAX_PASSWORD}"' in page.text
+
+    too_long_name = "a" * (MAX_USERNAME + 1 - len("@acme.example")) + "@acme.example"
+    long_user = submit(stack, rid, too_long_name)
+    long_password = submit(stack, rid, "maya.analyst@acme.example", "p" * (MAX_PASSWORD + 1))
+    for response in (long_user, long_password):
+        assert response.status_code == 401
+        assert "Incorrect username, password or authenticator code." in response.text
+    # the echoed username is cut, so a huge value cannot be reflected or stored whole
+    echoed = re.search(r'name="username"[^>]*value="([^"]*)"', long_user.text).group(1)
+    assert len(echoed) <= MAX_USERNAME
+    # a limit that exactly fits still works
+    assert submit(stack, rid, "omar.auditor@acme.example").status_code == 303
+
+
+def test_an_oversized_login_body_is_refused(stack):
+    rid = start_login(stack)
+    response = stack.idp.post(
+        "/login",
+        data={"rid": rid, "username": "maya.analyst@acme.example", "password": "x" * 100_000},
+    )
+    assert response.status_code == 413

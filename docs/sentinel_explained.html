@@ -1,0 +1,234 @@
+<!doctype html>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sentinel Mesh Explained</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Public+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: one calm reading column, numbered problem/solution blocks, a plain results table. */
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --fg: #16202b;
+  --muted: #55626f;
+  --line: #d9dee5;
+  --accent: #0b5d6b;
+  --accent-soft: #dff0f2;
+  --warn: #8a5a00;
+  --warn-soft: #fbefd5;
+  --font-display: "Fraunces", Georgia, serif;
+  --font-body: "Public Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e151c; --surface: #16202a; --fg: #e6ebf0; --muted: #9aa8b5; --line: #29343f;
+    --accent: #5cc4d3; --accent-soft: #143038; --warn: #f0c36a; --warn-soft: #3a2e12;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e151c; --surface: #16202a; --fg: #e6ebf0; --muted: #9aa8b5; --line: #29343f;
+  --accent: #5cc4d3; --accent-soft: #143038; --warn: #f0c36a; --warn-soft: #3a2e12;
+  color-scheme: dark;
+}
+body { background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 16px; line-height: 1.6; padding-inline: 16px; }
+main { max-width: 760px; margin: 0 auto; padding-block: 40px 64px; display: flex; flex-direction: column; gap: 40px; }
+h1, h2 { font-family: var(--font-display); line-height: 1.2; text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(2rem, 6vw, 2.9rem); }
+h2 { font-size: 1.55rem; }
+h3 { font-size: 1.05rem; margin: 0; }
+p { margin: 0; }
+.lede { font-size: 1.15rem; color: var(--muted); }
+.label { font-size: 0.78rem; letter-spacing: 0.09em; text-transform: uppercase; font-weight: 600; color: var(--accent); }
+section { display: flex; flex-direction: column; gap: 16px; }
+ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 12px; }
+li { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px; min-width: 0; }
+li b { display: block; margin-bottom: 2px; }
+li span { color: var(--muted); }
+.example { background: var(--accent-soft); border-radius: 6px; padding: 14px 16px; }
+.warn { background: var(--warn-soft); border-radius: 6px; padding: 14px 16px; color: var(--fg); }
+.warn h3 { color: var(--warn); }
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; min-width: 520px; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+tr:last-child td { border-bottom: 0; }
+code { font-family: ui-monospace, Consolas, monospace; font-size: 0.9em; background: var(--accent-soft); padding: 1px 6px; border-radius: 4px; }
+a { color: var(--accent); }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+
+<main>
+  <header style="display:flex;flex-direction:column;gap:12px">
+    <span class="label">Project summary</span>
+    <h1>Sentinel Mesh</h1>
+    <p class="lede">A security team that never sleeps, built as software: it watches for attacks, checks the software a company depends on, and fixes problems, while a human approves every serious action.</p>
+  </header>
+
+  <section>
+    <span class="label">The problem</span>
+    <h2>Small and mid-size companies cannot keep up with attacks</h2>
+    <ul>
+      <li><b>Too many alerts.</b><span>Security tools raise thousands of alarms a day. Most are false. A tired person has to read them all.</span></li>
+      <li><b>Not enough people.</b><span>Companies of this size cannot afford a 24-hour security team, so real attacks get missed or found late.</span></li>
+      <li><b>Attacks come through other people's software.</b><span>A company uses hundreds of packages written by others. One weak package can put every product that uses it at risk. This is called a supply-chain risk.</span></li>
+      <li><b>Writing the fix is slow.</b><span>Even after a flaw is found, someone must find the bad code, write a patch and open a pull request.</span></li>
+      <li><b>Automation is scary.</b><span>A tool that acts alone can lock out a real employee or break a system. Companies need speed <em>and</em> a human in control.</span></li>
+    </ul>
+    <p class="example"><b>Goal:</b> cut the noise, find the real attacks, respond fast, and keep every action approved by a person and recorded.</p>
+  </section>
+
+  <section>
+    <span class="label">The solution I built</span>
+    <h2>Five cooperating agents, one approval gate, one record</h2>
+    <ul>
+      <li><b>1. Triage.</b><span>Reads the raw alert feed and scores each alert. A trained detector keeps the likely attacks and drops most of the noise, so people see far fewer alerts.</span></li>
+      <li><b>2. Investigation.</b><span>Takes an alert and gathers evidence: what happened before it, which techniques from the MITRE ATT&amp;CK catalogue match, and a plain-language explanation.</span></li>
+      <li><b>3. Containment.</b><span>Chooses a response, such as blocking an IP address, isolating a machine or disabling an account. It never acts on its own for risky steps.</span></li>
+      <li><b>4. Supply-chain agent.</b><span>Builds a map of packages and who depends on whom. A graph neural network ranks which packages are the riskiest, including risk inherited from what they depend on.</span></li>
+      <li><b>5. Code-fix agent.</b><span>Scans a repository, finds weak code, and drafts a pull request with a fix. It never merges the change itself.</span></li>
+    </ul>
+    <ul>
+      <li><b>Human Approval Gate.</b><span>Every action that changes something waits for a person to approve it.</span></li>
+      <li><b>Tamper-evident audit log.</b><span>Every step is written to a chain of records. If anyone edits history, the chain breaks and it shows.</span></li>
+      <li><b>Real login and roles.</b><span>Sign-in needs a username, a password and a one-time code from an authenticator app. There is no sign-up page. Each role (analyst, auditor, viewer) sees only the controls it is allowed to use.</span></li>
+      <li><b>A dashboard.</b><span>One website with the overview, incidents, a live alert feed, launchable scenarios, evaluation, models, audit, supply-chain map and code scan.</span></li>
+    </ul>
+  </section>
+
+  <section>
+    <span class="label">Two modes</span>
+    <h2>The demo is synthetic. The real login uses real data.</h2>
+    <ul>
+      <li><b>Synthetic demo.</b><span>Generated traffic and a seeded example repository. It is repeatable and needs no downloads, so it is good for showing how the system works.</span></li>
+      <li><b>Real data.</b><span>Sign in with a real-data account and the whole dashboard is rebuilt from public data. A badge in the header says which mode you are in.</span></li>
+    </ul>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Part of the dashboard</th><th>What is real in the real mode</th></tr></thead>
+        <tbody>
+          <tr><td>Alerts and incidents</td><td>Real labelled network flows (UNSW-NB15) with real IP addresses and capture times</td></tr>
+          <tr><td>Investigations</td><td>MITRE's own ATT&amp;CK catalogue (697 techniques)</td></tr>
+          <tr><td>Supply chain</td><td>Six real open-source projects, their real dependencies and known vulnerabilities (OSV.dev, deps.dev), ranked with CISA's exploited-in-the-wild list and EPSS scores</td></tr>
+          <tr><td>Code scan</td><td>A real public repository, with a draft pull request that waits for approval</td></tr>
+          <tr><td>Response actions</td><td>Each action is mapped to the matching MITRE D3FEND defensive technique</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <span class="label">How well it works</span>
+    <h2>Measured results, including the weak ones</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Test</th><th>Result</th></tr></thead>
+        <tbody>
+          <tr><td>Detector on synthetic traffic</td><td>ROC-AUC 0.997; about 60% fewer alerts reach a human</td></tr>
+          <tr><td>Detector on real traffic with IPs and times</td><td>ROC-AUC 0.981; recall 0.987; precision 0.948; alert reduction 59.7%</td></tr>
+          <tr><td>Same real dataset without IPs and times</td><td>ROC-AUC 0.769. Knowing who talked to whom, and when, matters a lot.</td></tr>
+          <tr><td>Supply-chain model on the real graph</td><td>Top-10 precision 0.4, against 0.3 for a simple baseline. The test has only 15 risky packages, so this proves little.</td></tr>
+          <tr><td>Code scanner on real vulnerable files</td><td>Flagged 4 of 14 vulnerable files. Caught 4 of 25 real library flaws before their fix.</td></tr>
+          <tr><td>Automated tests</td><td>Thousands of Python tests and 54 front-end tests. One timing test can slip when the computer is busy.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="warn">
+      <h3>What this project does not claim</h3>
+      <ul style="margin-top:10px">
+        <li style="background:transparent;border:0;padding:0"><span>The response policy learns from a simulator we wrote. No public dataset of real analyst decisions exists. Only the action names and the vulnerability ranking come from real sources.</span></li>
+        <li style="background:transparent;border:0;padding:0"><span>The scanner is weak on flaws deep inside libraries. On simple application code it does better.</span></li>
+        <li style="background:transparent;border:0;padding:0"><span>Connectors to Wazuh, GitHub, identity and Slack run against local look-alike servers, not live company systems.</span></li>
+        <li style="background:transparent;border:0;padding:0"><span>The identity provider is a demo stand-in for Okta or Azure AD.</span></li>
+        <li style="background:transparent;border:0;padding:0"><span>No real malicious-package scenario is built yet.</span></li>
+      </ul>
+    </div>
+  </section>
+
+
+  <section>
+    <span class="label">Accounts and roles</span>
+    <h2>Why there is no "Create account" button</h2>
+    <p class="lede">A security tool must not let strangers make their own account. Access is given by the company, never asked for.</p>
+<ul><li><b>No sign-up page, on purpose.</b><span>If anyone could register, anyone could read incidents or approve actions. In a security product that is the biggest hole you can leave.</span></li><li><b>Accounts are made by the company's administrator.</b><span>In real life that is the company's identity system (Okta, Azure AD). The administrator adds a person there, and that person can then sign in here.</span></li><li><b>The product never stores or handles a real password.</b><span>The identity system checks the person and tells the dashboard who they are. That is called single sign-on (SSO).</span></li><li><b>In this demo, a small script makes the accounts.</b><span>When the server first starts, it creates the demo accounts and writes their passwords to a local file. It plays the part of Okta.</span></li><li><b>A person who is in no approved group is refused.</b><span>Access is opt-in. Being able to sign in to the identity system is not enough.</span></li><li><b>Removing someone is one step.</b><span>Deactivate them at the identity system and their open sessions here are cancelled straight away.</span></li></ul>
+  </section>
+
+  <section>
+    <span class="label">Who decides what</span>
+    <h2>How roles are made, and who is in charge</h2>
+<ul><li><b>There are two roles.</b><span><b style="display:inline">Analyst</b> can see everything and can act: approve or reject, launch scenarios, replay the feed. <b style="display:inline">Viewer</b> can see everything but cannot act. Auditors get this one.</span></li><li><b>Roles come from groups, not from this app.</b><span>The identity system puts each person in a group. The dashboard turns the group into a role: the group <code>SOC-Analyst</code> becomes analyst, and the group <code>Auditor</code> becomes viewer.</span></li><li><b>Who is "the main person"?</b><span>The company's administrator at the identity system. They create accounts, put people in groups, and remove them. There is no all-powerful admin inside the dashboard itself.</span></li><li><b>In this demo.</b><span>Maya is in SOC-Analyst, so she is an analyst. Omar is in Auditor, so he is a viewer. Carl is a contractor with limited access. Nina has no authenticator set up, so she is refused.</span></li><li><b>Machines use API keys.</b><span>Scripts and break-glass access use long secret tokens. People do not sign in that way.</span></li><li><b>A role change applies at the next sign-in.</b><span>The role is read when you sign in, not while you are already inside.</span></li></ul>
+    <div class="example"><b>Why it is built this way, in one line each (your defence):</b>
+      <ul style="margin-top:10px">
+        <li style="background:transparent;border:0;padding:0"><span><b style="display:inline">Least privilege.</b> Each person gets only what their job needs.</span></li>
+        <li style="background:transparent;border:0;padding:0"><span><b style="display:inline">Separation of duties.</b> The person who checks (auditor) cannot be the person who acts, so checking stays honest.</span></li>
+        <li style="background:transparent;border:0;padding:0"><span><b style="display:inline">One place to control access.</b> Joiners, movers and leavers are handled once, in the identity system, not in every tool.</span></li>
+        <li style="background:transparent;border:0;padding:0"><span><b style="display:inline">Second factor.</b> A stolen password alone is not enough, because the code comes from a device.</span></li>
+        <li style="background:transparent;border:0;padding:0"><span><b style="display:inline">Everything is recorded.</b> Every sign-in, refusal and change goes into the tamper-evident log.</span></li>
+        <li style="background:transparent;border:0;padding:0"><span><b style="display:inline">It is the market standard.</b> Real companies work this way, so the demo shows the real shape.</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <span class="label">Signing in with a code</span>
+    <h2>The six-digit authenticator code</h2>
+<ul><li><b>Setup, once.</b><span>The server makes a random secret for the account and stores it. The same secret goes into the authenticator app (or the demo command).</span></li><li><b>At sign-in.</b><span>You type your username and password.</span></li><li><b>Then the code.</b><span>The app mixes the secret with the current time (in 30-second slices) and keeps 6 digits. That is the code.</span></li><li><b>The server checks.</b><span>It does the same sum with its own copy of the secret and clock. If the numbers match, you are in.</span></li><li><b>Safe by design.</b><span>Codes change every 30 seconds, work only once, and five wrong tries lock the account for five minutes.</span></li><li><b>In the demo.</b><span>Run <code>python scripts/dev_idp_accounts.py code maya.analyst@acme.example</code> in the project folder and type the number at once.</span></li></ul>
+  </section>
+
+  <section>
+    <span class="label">The Overview page</span>
+    <h2>What Maya sees after signing in</h2>
+    <p class="lede">Three parts: eight status cards, three scenarios to launch, and a feed of alerts. Plus one button in the header.</p>
+
+    <h3>The eight cards (a quick health check)</h3>
+<ul><li><b>1. Waiting for approval.</b><span>How many proposed actions are stopped at the approval gate, waiting for a human to say yes or no. Nothing risky happens until this number is dealt with.</span></li><li><b>2. Incidents.</b><span>How many cases the system has opened so far, and how many raw alerts it took in to make them.</span></li><li><b>3. Alert reduction.</b><span>The share of alerts a person never had to read, because the system dismissed them as noise. Underneath: how many did reach a human. This is the main promise of the product.</span></li><li><b>4. MTTD (mean time to detect).</b><span>The average time from an alert arriving to the system deciding what it is. The target is under 30 seconds.</span></li><li><b>5. MTTC (mean time to contain).</b><span>The average time from that decision to an approved response, such as blocking or isolating. The target is under 3 minutes.</span></li><li><b>6. Audit chain.</b><span>Checks the tamper-evident log. "Verified" means no record was changed. "Broken" would mean someone edited history. It also shows how many records it checked and how long that took.</span></li><li><b>7. Ungated executions.</b><span>How many actions ran <em>without</em> approval. This must stay at 0. It is read back from the log, so it proves the gate cannot be skipped.</span></li><li><b>8. Failed actions.</b><span>Actions that were approved but did not work. Underneath: how many times the guardrails refused something outright.</span></li></ul>
+    <h3>The three scenarios you can launch</h3>
+    <p>Each is a ready-made attack story. Pressing <b>Launch scenario</b> feeds its events into the system so you can watch it work and approve the steps.</p>
+<ul><li><b>Phishing to lateral movement.</b><span>An employee clicks a phishing link. The attacker then spreads from that laptop to the file server using stolen admin logins. You watch the system detect each step and propose isolating the laptop and blocking the address.</span></li><li><b>Vendor-dependency CVE.</b><span>Four security flaws are announced in an abandoned package hidden four levels deep in other companies' software. You see the map of who is exposed and approve a fix, which opens a tracking issue.</span></li><li><b>Malicious open-source package.</b><span>An abandoned package changes owner and its new version steals secrets from build servers. It even hides a note telling AI scanners to ignore it. The system treats that note as plain text and still escalates. You approve isolating the build server.</span></li></ul>
+    <p>In the real-data workspace this section is called "Launch a real case", and the cases come from real flows, real advisories and a real code scan.</p>
+
+    <h3>The background feed</h3>
+<ul><li><b>What it is.</b><span>A stock of network events the system has not seen yet, held back on purpose.</span></li><li><b>What Replay does.</b><span>You choose how many, and it pushes that many through the same pipeline. Most are dismissed as harmless. The ones that look like attacks join the approval queue.</span></li><li><b>Why it matters.</b><span>The alert-reduction number on the cards is measured on exactly these events, so it is not made up.</span></li><li><b>The counter.</b><span>It shows how many events remain. Only analysts see the Replay controls.</span></li></ul>
+    <h3>The live demo button</h3>
+<ul><li><b>Where.</b><span>The "Start live feed" button in the top bar.</span></li><li><b>What it does.</b><span>It runs the feed for you automatically, a small batch every few seconds, so the numbers move on their own like a real security centre.</span></li><li><b>What you see.</b><span>A running count on the button: how many came in, how many were dismissed, and how many need approval. The cards and the approval queue update as it goes.</span></li><li><b>Control.</b><span>Click it again to stop, and again to resume. It ends when every held-back event has been used. Analysts only.</span></li></ul>
+  </section>
+
+
+
+
+
+
+
+  <section id="phishing-script">
+    <span class="label">Presenting tomorrow</span>
+    <h2>Phishing to lateral movement: what I say, screen by screen</h2>
+    <p class="lede">The order on your screen is: (A) three incidents appear, (B) the Approval queue, (C) the Incident page with the full report, (D) you decide. Every value below is what the synthetic demo really shows.</p>
+    <p class="example"><b>You say:</b> “A finance employee clicked a phishing link. This scenario shows the three things the attacker did next, and how the system catches each one and asks a human before it acts.”</p>
+
+    <h2 style="margin-top:8px">A. I click Launch and three incidents appear</h2>
+    <p>The card shows three lines, each “awaiting approval”. An incident is one case the system opened for one suspicious event. These three are the attack in time order.</p>
+<h3>Incident 1: “Second-stage fetch from ws-fin-07 after the phishing click”</h3><ul><li><b>What it is.</b><span>The infected finance laptop <b style="display:inline">ws-fin-07</b> (10.20.4.17) connects out to an unknown outside server (203.0.113.47) and pulls down more malware. This is the “second stage” of the attack.</span></li><li><b>Why the system flagged it.</b><span>Almost all the traffic went one way, and it was far larger than a normal connection. The system scored it 0.996 out of 1 on “how abnormal”.</span></li><li><b>Technique.</b><span><b style="display:inline">T1105</b>, called Ingress Tool Transfer in the MITRE ATT&amp;CK catalogue: bringing attack tools in from outside.</span></li></ul><p class="example"><b>You say:</b> “This is the moment the company was breached. Incident 1 is the infected laptop calling out to the attacker to download more malware.”</p><h3>Incident 2: “Internal discovery sweep from ws-fin-07 against fs-01”</h3><ul><li><b>What it is.</b><span>The same laptop starts probing the file server <b style="display:inline">fs-01</b> (10.20.1.10), trying many ports and services to see what is there.</span></li><li><b>Why the system flagged it.</b><span>One machine touched many different ports on one server in a short time. Anomaly score 1.000.</span></li><li><b>Technique.</b><span><b style="display:inline">T1046</b>, Network Service Discovery: mapping the network to find things to attack.</span></li></ul><p class="example"><b>You say:</b> “Incident 2 is the attacker looking around. Having taken the laptop, they scan the file server to find what is worth stealing.”</p><h3>Incident 3: “Credential burst against fs-01 from the IT jump host”</h3><ul><li><b>What it is.</b><span>A rapid burst of login attempts hits the file server <b style="display:inline">fs-01</b> from the IT jump host <b style="display:inline">jump-01</b> (10.20.0.5), trying stolen admin credentials. The jump host is IT’s trusted entry point, so it is marked protected.</span></li><li><b>Why the system flagged it.</b><span>Very many attempts, arriving with machine-like regular timing. The classifier was certain it was brute force (probability 1.000).</span></li><li><b>Technique.</b><span><b style="display:inline">T1110</b>, Brute Force. The report also lists T1110.003 (password spraying) and T1110.004 (credential stuffing).</span></li></ul><p class="example"><b>You say:</b> “Incident 3 is the attacker trying stolen admin passwords on the file server. If one works, they control the server.”</p>
+    <h2 style="margin-top:8px">B. I open the Approval queue</h2>
+    <p>The left menu has <b style="display:inline">Approval queue</b>. It lists every proposal that is paused waiting for a human. For this scenario there are three cards.</p>
+<ul><li><b>What each card shows.</b><span>A severity badge (critical, medium, high), when it was requested, a heading such as “Isolate host → ws-fin-07”, the incident name, the system’s reason, and a button called Review and decide.</span></li><li><b>Card 1.</b><span><b style="display:inline">Isolate host → ws-fin-07</b>. Critical.</span></li><li><b>Card 2.</b><span><b style="display:inline">Block ip → ws-fin-07</b>. Medium.</span></li><li><b>Card 3.</b><span><b style="display:inline">Block ip → 10.20.0.5</b>. High. This is the protected jump host.</span></li><li><b>What the queue means.</b><span>Nothing here has happened yet. These are suggestions from the Containment agent. The number matches the “Waiting for approval” card on the Overview.</span></li></ul><p class="example"><b>You say:</b> “This is the approval queue. The system found three problems and proposed a response to each, but it will not act until a person decides. I will open the first one.”</p>
+    <h2 style="margin-top:8px">C. I click Review and decide: the full report</h2>
+    <p>This is the Incident page. It reads top to bottom. Here is each block, in the order it appears, using Incident 1 as the example.</p>
+<h3>1. Title bar</h3><ul><li><b>Shows.</b><span>The incident name, a badge for the type (incident), the status (awaiting approval) and the scenario tag (phishing-lateral).</span></li></ul><h3>2. Human Approval Gate (the box you act on)</h3><ul><li><b>Proposed action.</b><span><b style="display:inline">Isolate host → ws-fin-07</b>. Cut this laptop off from the network.</span></li><li><b>Reason.</b><span>“Isolate_host on 10.20.4.17 requires approval (trust tier recommend): Policy chose escalate (confidence 0.31) for a critical alert triaged escalate and mapped to T1105.”</span></li><li><b>Proposed by.</b><span>Containment agent.</span></li><li><b>Trust tier.</b><span><b style="display:inline">Recommend</b>. The system may suggest, never do it alone.</span></li><li><b>Destructive.</b><span>Yes. Isolating a machine disrupts the person using it, so it needs a human.</span></li><li><b>Evidence attached.</b><span>The proof the system used: the ATT&amp;CK description of the technique, a playbook on command-and-control, the raw alert fields (source, destination, port, protocol) and the model score.</span></li><li><b>Note, Approve, Reject.</b><span>A box for an optional note, then two buttons. Your note and your name are saved in the audit record.</span></li></ul><p class="example"><b>You say:</b> “This box is where I decide. It tells me what is proposed, why, who proposed it, that it is disruptive, and shows the proof.”</p><h3>3. Alert (what came in)</h3><ul><li><b>Source.</b><span>Network IDS: the network sensor that raised it.</span></li><li><b>Asset.</b><span>ws-fin-07, the finance workstation.</span></li><li><b>Flow.</b><span>10.20.4.17:49444 → 203.0.113.47:22, TCP. From the laptop to the outside server, on port 22.</span></li><li><b>Signature.</b><span>cic-ids2017:infiltration. The kind of attack the sensor recognised.</span></li><li><b>Occurred and Ingested.</b><span>When it happened, and when the system received it. The alert is dated about 9 minutes before Launch, so the story looks like it unfolded in time.</span></li><li><b>Injection scan.</b><span><b style="display:inline">clean</b>. The system checks alerts for hidden instructions aimed at AI tools. This one has none.</span></li><li><b>Raw payload.</b><span>The original record, shown as plain inert text. It is never run or trusted.</span></li></ul><h3>4. Triage (is this real?)</h3><ul><li><b>Decision.</b><span><b style="display:inline">escalate</b>. A human must look.</span></li><li><b>Severity.</b><span>Critical.</span></li><li><b>Confidence and anomaly score.</b><span>0.97 and 0.996. Anomaly score is how unusual the traffic is compared with normal traffic.</span></li><li><b>Technique.</b><span>T1105.</span></li><li><b>Supporting fields.</b><span>The measurements that drove the decision: src_bytes, bytes_ratio_src_to_total, src_bytes_sum_window. In plain words: the laptop sent a lot of data, nearly all one way.</span></li><li><b>Reason line.</b><span>“Anomaly ensemble scored 0.996 (escalate ≥ 0.995, monitor ≥ 0.985). Classifier: infiltration at p = 0.962. Decision: escalate.” Meaning: two detectors agree it is abnormal, above the escalation line of 0.995, and a second model says 96 percent that it is an infiltration.</span></li><li><b>Model.</b><span>triage-1.</span></li></ul><p class="example"><b>You say:</b> “Triage says this is real, critical, and it can show why: the traffic was extremely unusual, and a second model classed it as infiltration with 96 percent certainty.”</p><h3>5. Timing and integrity</h3><ul><li><b>Detect (MTTD).</b><span>About 0.05 seconds from the alert arriving to the decision. The target is under 30 seconds.</span></li><li><b>Waiting on a human.</b><span>Counts how long it waits for you. It starts at 0 and grows until you decide.</span></li><li><b>Checkpoints.</b><span>A saved record of each step, with the label <b style="display:inline">chain verified</b>.</span></li></ul><h3>6. Investigation (the proof, with citations)</h3><ul><li><b>Summary.</b><span>“CRITICAL, escalate on asset 10.20.4.17 mapped to T1105…”</span></li><li><b>Claims.</b><span>Four short statements, each with a reference to its source: the detector scored it 0.996; it involves this asset on the network IDS feed; the pattern maps to T1105; response guidance exists. The label says every claim is cited.</span></li><li><b>Evidence.</b><span>The list of sources: the MITRE description, the detection advice, and the alert fields.</span></li></ul><p class="example"><b>You say:</b> “The investigation does not just say ‘attack’. Every claim points to a source I can check. That is how I trust it.”</p><h3>7. Response policy</h3><ul><li><b>What it shows.</b><span>The policy’s choice (escalate), its confidence (0.31) and its expected payoff for each option: dismiss −0.36, monitor −0.12, escalate +0.20.</span></li><li><b>Meaning.</b><span>Escalate has the best expected outcome, so it chose that. The low confidence is why a human still decides.</span></li></ul><h3>8. Actions, On the wire, Graph steps, Audit timeline (the lower blocks)</h3><ul><li><b>Actions.</b><span>A table of the proposed action with its status, whether it is gated, who decided and when. Before you decide it says pending.</span></li><li><b>On the wire.</b><span>Which outside systems were called. Empty until you approve.</span></li><li><b>Graph steps.</b><span>The three stages it went through: triage, investigate, contain.</span></li><li><b>Audit timeline.</b><span>The tamper-evident log rows for this incident. It grows after your decision.</span></li></ul>
+    <h2 style="margin-top:8px">D. What I decide on each incident</h2>
+<ul><li><b>Incident 1: Approve.</b><span>Note: “Confirmed foothold. Isolating.” The action becomes executed and the incident becomes completed. The laptop is isolated.</span></li><li><b>Incident 2: Reject.</b><span>Note: “Host already isolated.” The action becomes rejected and nothing runs. This shows a person can overrule the system.</span></li><li><b>Incident 3: Approve.</b><span>The action becomes failed. A red bar shows the reason, and “On the wire” lists a guardrail refusal. The jump host is protected, so the system refuses even an approved block.</span></li></ul><p class="example"><b>You say:</b> “Three incidents, three different outcomes. One approved and carried out. One rejected by me. One refused by a safety rule. Nothing happened without approval, and every step is in the audit log.”</p>
+    <h3>After all three</h3>
+<ul><li><b>Overview cards.</b><span>Waiting for approval <b style="display:inline">0</b>, Incidents <b style="display:inline">3</b>, Failed actions <b style="display:inline">1</b> with 1 guardrail refusal, Ungated executions <b style="display:inline">0</b>.</span></li><li><b>Audit log.</b><span>Every decision carries Maya’s name and the chain shows verified.</span></li><li><b>Nothing real was touched.</b><span>Isolations and blocks go to look-alike servers on this computer.</span></li></ul>
+  </section>
+
+  <section>
+    <span class="label">Try it</span>
+    <h2>Run it on this computer</h2>
+    <ul>
+      <li><b>Start.</b><span><code>python -m sentinel.dashboard --dev-idp</code></span></li>
+      <li><b>Open.</b><span><code>http://127.0.0.1:8765/</code></span></li>
+      <li><b>Sign in.</b><span>Passwords are in <code>data/dev-idp-credentials.txt</code>. The six-digit code comes from <code>python scripts/dev_idp_accounts.py code</code>.</span></li>
+      <li><b>Show both modes.</b><span>First a synthetic-demo user, then the real-data user, and point at the header badge.</span></li>
+    </ul>
+  </section>
+</main>
